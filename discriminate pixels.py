@@ -52,9 +52,9 @@ def find_good_pix(mus, min_samples=4, eps=0.05):
     Dlabels=db.labels_
     
     # Visualization for debugging
-    plt.figure(4)
-    plt.scatter(normmns[Dlabels!=-1], normstds[Dlabels!=-1], color='b', alpha=0.5)
-    plt.scatter(normmns[Dlabels==-1], normstds[Dlabels==-1], color='k', alpha=0.5)
+    #plt.figure(4)
+    #plt.scatter(normmns[Dlabels!=-1], normstds[Dlabels!=-1], color='b', alpha=0.5)
+    #plt.scatter(normmns[Dlabels==-1], normstds[Dlabels==-1], color='k', alpha=0.5)
     
     return np.arange(len(mus))[Dlabels!=-1]
 
