@@ -4,6 +4,7 @@
 # Still very much a work in progress but the form is there
 
 import os
+import time
 import numpy as np
 import matplotlib.pyplot as plt
 import torch
@@ -72,7 +73,7 @@ class Mu_to_Chi_Transform():
             return
         return ie0, k, kmin_idx
     
-    def chi(self, e, ie0, mu, pre, k, kmin_idx, kw=2):
+    def chi(self, e, ie0, mu, pre, k, kmin_idx, kw=2, freeze_params=False):
         # k starts from e0
         fun_fit = (mu[ie0:] - pre[ie0:]) * k**kw
         n_knots = int(2.0 * (k.max()-k.min()) / np.pi) + 1
@@ -80,16 +81,22 @@ class Mu_to_Chi_Transform():
     #        print(k, fun_fit, knots)
     #        print(np.diff(k))
         spl = LSQUnivariateSpline(k, fun_fit, knots)
-        self.post = spl(k[kmin_idx:]) / k[kmin_idx:]**kw
-        self.edge_step = self.post[0]
+        
+        if not freeze_params:
+            self.post = spl(k[kmin_idx:]) / k[kmin_idx:]**kw
+            self.edge_step = self.post[0]
         chi = (mu - pre)[ie0:] - self.edge_step
         chi[kmin_idx:] += self.edge_step - self.post
         chi /= self.edge_step
         
+        if not freeze_params:
+            self.scale=max(chi)-min(chi)
+        chi/=self.scale
+        
         return chi
         
         
-    def forward(self, e, mu):
+    def forward(self, e, mu, freeze_params=False):
 
         xax = np.copy(e)
         diffTest = np.diff(xax) <= 0
@@ -102,15 +109,19 @@ class Mu_to_Chi_Transform():
             if kres is None:
                 print("kres is None.")
                 return
-            self.e0_idx, k, self.kmin_idx = kres
-
-            self.pre = self.pre_edge(xax, self.e0_idx, mu)
+            
+            ie0, k, kmin_idx = kres
+            if not freeze_params:
+                self.e0_idx, self.kmin_idx = ie0, kmin_idx
+                self.pre = self.pre_edge(xax, self.e0_idx, mu)
+                
             if self.pre is None:
                 print("pre_edge is None")
                 return
-            chi = self.chi(xax, self.e0_idx, mu, self.pre, k, self.kmin_idx)
-            self.scale=max(chi)-min(chi)
-            chi/=self.scale
+        
+            chi = self.chi(xax, self.e0_idx, mu, self.pre, k, self.kmin_idx,
+                           freeze_params=freeze_params)
+
         except ValueError:
             print("Value error.")
             return
@@ -141,13 +152,14 @@ class Mu_Deglitcher():
     def __init__(self):
         
         # Load the model
-        device='cpu'        
+          
         hidden_size=32        
         batch_size=1
         num_layers=4
         bidirectional=False
         drop_prob=0.5
         
+        self.device= torch.device('cuda' if torch.cuda.is_available() else 'cpu')   
         self.chunk_size=16
         self.out_size=1
         self.model=LSTMModel(self.chunk_size, 
@@ -157,9 +169,9 @@ class Mu_Deglitcher():
                              num_layers, 
                              drop_prob,
                              bidirectional,
-                             device).to(device)
+                             self.device).to(self.device)
         self.model.load_state_dict(torch.load("lstm_chi1.pth",
-                                              map_location=torch.device(device)))
+                                              map_location=torch.device(self.device)))
         self.model.init_hidden(batch_size)
         
         # Define the transform class
@@ -221,7 +233,7 @@ class Mu_Deglitcher():
         # Grubb's test requires a short history of residuals. We obviously can't
         # make predictions before the chunk_size+1th point, so the predictions 
         # are initialized by adding noise to the actual signal
-        predictions=list(deglitched[:self.chunk_size]+np.random.normal(0, 0.02, self.chunk_size))
+        predictions=list(deglitched[:self.chunk_size]+np.random.normal(0, 0.04, self.chunk_size))
         
         # ind is the index of the value of the signal to be predicted
         # Cycle over every point after ind=chunk_size to look for and fix glitches
@@ -244,7 +256,7 @@ class Mu_Deglitcher():
             #    threshold=max(0.1,5*np.sqrt(np.mean((predictions[-chunk_size:]-chunk.squeeze().numpy())**2)))
             
             # prediction: the value after of the signal chunk predicted by the model
-            prediction=self.model(chunk.view(1,1,-1)).squeeze().item()
+            prediction=self.model(chunk.view(1,1,-1).to(self.device)).squeeze().item()
             predictions.append(prediction)
             
             
@@ -274,13 +286,13 @@ class Mu_Deglitcher():
     
                 # Make a prediction for the next point 
                 chunk2=torch.Tensor(deglitched[next_ind-self.chunk_size:next_ind]).float().detach()
-                prediction2=self.model(chunk2.view(1,1,-1)).squeeze().item()
+                prediction2=self.model(chunk2.view(1,1,-1).to(self.device)).squeeze().item()
                 val2=deglitched[next_ind]
                 
                 r=(np.append(predictions[-self.chunk_size:], prediction2)
                 -np.append(chunk2.squeeze().numpy(), val2))
                 
-                chunk_glitch_ind=self.Grubbs_test(r, sig_val/4)
+                chunk_glitch_ind=self.Grubbs_test(r, sig_val/2)
                 
                 # THRESHOLD METHOD
                 # If the next point is still far from the prediction
@@ -320,36 +332,88 @@ class Mu_Deglitcher():
         
     
     
-    def run(self, e, glitchy_mu, sig_val, return_all):
+    def run(self, e, glitchy_mu, sig_val, visualize):
         
         k, chi=self.transform.forward(e, glitchy_mu)
         
-        if return_all:
+        if visualize:
             
             # The guessed glitchy points are the indices of k, not e.
             (deglitched_chi,
             predictions,
             point_glitches,
-            step_glitches)=self.deglitch(chi, sig_val, return_all)
+            step_glitches)=self.deglitch(chi, sig_val, visualize)
             
             # Some visualization
-            #plt.figure(3)
-            #plt.plot(k, chi)
-            #plt.scatter(k[:-self.out_size], predictions, s=8, color='r')
-            #print("Possible point glitches at: ", k[point_glitches])
-            #print("Possible step glitches at: ", k[step_glitches])
-            
-            deglitched_mu=self.transform.reverse(deglitched_chi, glitchy_mu)
-            
-            return deglitched_mu, predictions, point_glitches, step_glitches
-            
+            plt.figure(3)
+            plt.plot(k, chi)
+            plt.plot(k, deglitched_chi)
+            plt.scatter(k[:-self.out_size], predictions, s=8, color='r')
+            print("Possible point glitches at: ", k[point_glitches])
+            print("Possible step glitches at: ", k[step_glitches])       
             
         else:
-            deglitched_chi=self.deglitch(chi, sig_val, return_all)
-            deglitched_mu=self.transform.reverse(deglitched_chi, glitchy_mu)
+            deglitched_chi=self.deglitch(chi, sig_val, visualize)
             
-            return deglitched_mu
+        deglitched_mu=self.transform.reverse(deglitched_chi, glitchy_mu)
+            
+        return deglitched_mu
         
+        
+    def run_twostage(self, e, glitchy_mu, sig_val, visualize):
+        
+        # Get the first transformation to chi
+        k, chi1 = self.transform.forward(e, glitchy_mu)
+        
+        # Find the glitches as normal
+        (deglitched_chi1,
+         predictions,
+         point_glitches,
+         step_glitches)=self.deglitch(chi1, sig_val, return_all=True)
+        
+        # Do a rough deglitch at the potential problem points
+        mu2=np.copy(glitchy_mu)
+        for ind in point_glitches:
+            ind+=self.transform.e0_idx
+            mu2[ind]=(mu2[ind-1]+mu2[ind+1])/2
+        for ind in step_glitches:
+            ind+=self.transform.e0_idx
+            mu2[ind:]-=mu2[ind]-mu2[ind-1]
+            
+        # Visualization
+        if visualize:
+            plt.figure(3)
+            plt.plot(e, glitchy_mu)
+            plt.plot(e, mu2)
+        
+        # Transform again using the roughly deglitched mu
+        k, chi2 = self.transform.forward(e, mu2)
+        
+        # Transform the original mu using the spline, etc. from the previous
+        # transformation
+        k, chi3 = self.transform.forward(e, glitchy_mu, freeze_params=True)
+        
+        # Deglitch as normal
+        if visualize:
+            (deglitched_chi,
+            predictions,
+            point_glitches,
+            step_glitches)=self.deglitch(chi3, sig_val, visualize)
+            
+            plt.figure(4)
+            plt.plot(k, chi3)
+            plt.plot(k, deglitched_chi)
+            plt.scatter(k[:-self.out_size], predictions, s=8, color='r')
+            print("Possible point glitches at: ", k[point_glitches])
+            print("Possible step glitches at: ", k[step_glitches])
+            
+        else:
+            deglitched_chi=self.deglitch(chi3, sig_val, visualize)
+        
+        # Transform back to mu
+        deglitched_mu=self.transform.reverse(deglitched_chi, glitchy_mu)
+        
+        return deglitched_mu
         
 
 
@@ -460,43 +524,50 @@ if __name__=="__main__":
     E=np.load("pixel_es.npy", allow_pickle=True)
     NPIX=32
     #start=np.random.choice(range(64))
-    start=58
-    print("Start: %d"%start)
-    es=E[start*NPIX:(start+1)*NPIX]
-    mus=np.stack(MU[start*NPIX:(start+1)*NPIX])
-    good_pix_inds=find_good_pix(mus)
-    mu=np.sum(mus[good_pix_inds], axis=0)
-    e=np.sum(es[good_pix_inds], axis=0)/len(good_pix_inds)
+    #start=58
+    #print("Start: %d"%start)
+    #es=E[start*NPIX:(start+1)*NPIX]
+    #mus=np.stack(MU[start*NPIX:(start+1)*NPIX])
+    #good_pix_inds=find_good_pix(mus)
+    #mu=np.sum(mus[good_pix_inds], axis=0)
+    #e=np.sum(es[good_pix_inds], axis=0)/len(good_pix_inds)
+    ind=np.random.randint(0,len(MU))
+    mu=MU[ind]
+    e=E[ind]
+    while mu[0]!=mu[0] or max(mu)==0:
+        ind=np.random.randint(0,len(MU))
+        mu=MU[ind]
+        e=E[ind]
     
     glitchy=np.copy(mu)
     
     # Add glitches if desired
-    add_glitches=False
+    add_glitches=True
+    chunk_size=16
     if add_glitches:
         glitchy, step_glitch_ind =add_step_glitch_clean_start(glitchy,
-                                            min_size=max(glitchy)/20,
-                                            max_size=max(glitchy)/15,
+                                            min_size=max(glitchy)/15,
+                                            max_size=max(glitchy)/10,
                                             skip_num_points=chunk_size,
                                             return_ind=True)
         glitchy, point_glitch_inds=add_point_glitch_clean_start(glitchy,
                                             min_size=max(glitchy)/20,
-                                            max_size=max(glitchy)/15,                                             skip_num_points=chunk_size,
+                                            max_size=max(glitchy)/15,                                             
+                                            skip_num_points=chunk_size,
                                             return_inds=True)
     
     
     plt.figure(1)
-    plt.plot(e,glitchy)
+    plt.plot(e, mu, label='Original mu')
+    plt.plot(e,glitchy, label='With added glitches')
 
     # Here's the syntax for the use of the deglitcher
-    Deglitcher=Mu_Deglitcher()
-    #(deglitched_mu, 
-    #predictions,
-    #point_glitch_guesses,
-    #step_glitch_guesses) = Deglitcher.run(e, mu, sig_val=0.005, return_all=True)
-    
-    # Or:
-    deglitched_mu = Deglitcher.run(e, glitchy, sig_val=0.001, return_all=False)
-
+    Deglitcher=Mu_Deglitcher()    
+    t0=time.time()
+    deglitched_mu = Deglitcher.run_twostage(e, glitchy, sig_val=0.01, visualize=True)
+    t1=time.time()
     plt.figure(1)
-    plt.plot(e, deglitched_mu)
+    plt.plot(e, deglitched_mu, label='Deglitched')
+    plt.legend()
+    print("That took %.3f seconds."%(t1-t0))
     
