@@ -289,7 +289,7 @@ class Mu_Deglitcher():
                 
                 
                 # GRUBB'S TEST METHOD
-                if chunk_glitch_ind==chunk_size:
+                if chunk_glitch_ind==self.chunk_size:
                 
                     # Subtract the inital step from the rest of the spectrum
                     # Another method was tried and commented out
