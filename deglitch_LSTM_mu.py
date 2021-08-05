@@ -345,7 +345,7 @@ class Mu_Deglitcher():
             
             
         else:
-            deglitched_chi=self.deglitch(chi)
+            deglitched_chi=self.deglitch(chi, sig_val, return_all)
             deglitched_mu=self.transform.reverse(deglitched_chi, glitchy_mu)
             
             return deglitched_mu
