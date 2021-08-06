@@ -1,4 +1,4 @@
-# Identifies and removes point and step glithes in mu(e)
+# Identifies and removes point and step glithes in mu(E)
 # Uses the chi extractor from AcquamanHDFExplorer to transform mu into chi,
 # perform the deglitching on chi, and then transform back
 # Still very much a work in progress but the form is there
@@ -149,11 +149,34 @@ class Mu_to_Chi_Transform():
 
 
 class Mu_Deglitcher():
+    """
+    Wraps all the functions necessary to perform the deglitching on mu.
+    
+    Variables:
+    device ('cpu' or 'cuda'): The device to be used when running the model 
+    on the chunks.
+    chunk_size (int): The number of points in each chunk. Default is 16. 
+    For the model currently being loaded, chunk_size must be 16.
+    out_size (int): The number of floats outputted by the model. Default
+    is 1. For the current model, out_size must be 1.
+    model (pytorch module): The LSTM model used for predicting the next
+    point in the sequence.
+    Transform (class): The class used to transform mu to chi and back again.
+    Default is Mu_to_Chi_transform(). It must contain .forward() and .reverse()
+    which return the respective transformations. .forward() must have the 
+    keyword boolean argument 'freeze_params'.
+    
+    Functions:
+    Grubbs_test: Performs Grubb's test on an array
+    deglitch: Removes sharp points and sudden steps from an array.
+    run: Performs the transformations and deglitching.
+    run_twostages: Performs the transformations and deglitching
+    with a two-stage process.
+    """
     
     def __init__(self):
         
         # Load the LSTM model with the required parameters.
-          
         hidden_size=32        
         batch_size=1
         num_layers=4
@@ -179,9 +202,22 @@ class Mu_Deglitcher():
         self.transform=Mu_to_Chi_Transform()
         
 
-    def Grubbs_test(self, r, sig_val):
+    def Grubbs_test(self, r, sig_val=0.025):
         """
-        Conducts Grubb's test with a given set of residuals r. 
+        Conducts Grubb's test with a given set of residuals r. Returns
+        the index of the item in r that is an outlier (if one exists)
+        according to Grubb's test.
+        
+        Parameters:
+        r (array, float): A 1D array of values, one of which may be an outlier.
+        sig_val (float, default=0.025): The significance value with which to 
+        identify the possible outlier according to Grubb's test. A higher
+        sig_val is more likely to result in an identified outlier. Values 
+        should be within an order of magnitude of the default for best results.
+        
+        Returns:
+        max_ind (int): The index of the item in r that is identified as an outlier.
+        If no outlier is identified, returns None.
         """
         
         mean=np.mean(r) # Calculate the mean of the residuals (ignoring NaN values)
@@ -207,10 +243,44 @@ class Mu_Deglitcher():
 
     def deglitch(self,
                  glitchy,
-                 sig_val, 
-                 return_all):
+                 sig_val=0.025, 
+                 return_all=False):
         """
-        Takes a glitchy signal, and deglitches it using the model provided
+        Takes a glitchy signal, and deglitches it using the model provided. 
+        
+        A trained LSTM model is used to take sets of consecutive values from
+        a signal and predict the next value in the sequence. The difference between
+        the predicted value and the next measured value is compared to the most recent
+        set of differences in predictions and measured values. If the latest difference
+        between the predicted value and the measured value is determined to be an outlier
+        by Grubb's test, then that point is labelled as a glitch. The measured value is 
+        replaced by the predicted value. If the following measured value is determined to 
+        be an outlier in the same way, the glitch is labelled as a step glitch and the
+        rest of the signal is shifted by the difference between the predicted value and 
+        the measured value. If the following point is not an outlier, then it was a point
+        glitch and was already replaced by the corresponding predicted value. 
+        
+        Instead of Grubb's test, a threshold method can be used to identify outliers.
+        The threshold is the maximum absolute difference a measured value can have from
+        the predicted value for it to be labelled as normal data. The threshold is
+        calculated as five times the root mean squared error between the most recent
+        set of predicted values and their measured values.
+        
+        Parameters:
+        glitchy (array, float): The set of values (signal) that is to be deglitched.
+        sig_val (float, default=0.025): The significance value with which Grubb's test is 
+        conducted. See Grubbs_test() for details.
+        return_all (bool, default=False): If false, deglitched is returned.
+        If true, deglitched, predictions, point_glitches, and step_glitches are returned.
+        
+        Returns:
+        deglitched (float, array): The deglitched set of values.
+        predictions (float, list): The list of predictions made by the model during
+        deglitching.
+        point_glitches (int, list): The list of indeces determined to contain point
+        glitches
+        step_glitches (int, list): The list of indeces determined to contain step
+        glitches
         """
         
         deglitched=glitchy.copy()
@@ -333,7 +403,29 @@ class Mu_Deglitcher():
         
     
     
-    def run(self, e, glitchy_mu, sig_val, visualize):
+    def run(self, e, glitchy_mu, sig_val=0.025, visualize=False):
+        """
+        Runs the transformations and deglitching algorithm on mu and returns
+        the deglitched mu.
+        
+        First, the given mu values are transformed to chi, deglitching is
+        performed on chi, and then using the same parameters for forward transformation,
+        transforms the deglitched chi back to mu.
+        
+        Paramters:
+        e (array, float): The array of energy values. Used for determining the
+        transformation of mu to chi.
+        glitchy_mu (array, float): The array of measured absorption coefficient values
+        corresponding to the energy values in e. May contain glitches.
+        sig_val (float, default=0.025): The parameter passed to deglitch(). See Grubbs_test()
+        for details.
+        visualize (bool, default=false): If true, will make plots depicting the deglitcing 
+        process. Visualization is helpful for testing and debuggin, but not necessary for
+        running the function.
+        
+        Returns:
+        deglitched mu (array, float): The array of deglitched absorption coefficient values. 
+        """
         
         k, chi=self.transform.forward(e, glitchy_mu)
         
@@ -346,7 +438,7 @@ class Mu_Deglitcher():
             step_glitches)=self.deglitch(chi, sig_val, visualize)
             
             # Some visualization
-            plt.figure(3)
+            plt.figure(2)
             plt.plot(k, chi)
             plt.plot(k, deglitched_chi)
             plt.scatter(k[:-self.out_size], predictions, s=8, color='r')
@@ -361,7 +453,36 @@ class Mu_Deglitcher():
         return deglitched_mu
         
         
-    def run_twostage(self, e, glitchy_mu, sig_val, visualize):
+    def run_twostage(self, e, glitchy_mu, sig_val=0.025, visualize=False):
+        """
+        Runs the transformations and deglitching algorithm on mu and returns
+        the deglitched mu.
+        
+        Large glitches may result in non-ideal background subtraction during the
+        transformation from mu to chi and therefore poorly placed deglitched points,
+        so a two-stage process is implemented to eliminate the effect of large glithes
+        on background subtraction.
+       
+        First, the given mu values are transformed to chi, then glitches are identified
+        in chi and crudley deglitched in mu. The crudely deglitched mu is then transformed
+        to chi again. Using the background subtraction from this latest transformation,
+        the original mu is transformed to chi again, but without the effect of the large 
+        glitches. This latest chi is deglitched as normal, and transformed back to mu.
+        
+        Paramters:
+        e (array, float): The array of energy values. Used for determining the
+        transformation of mu to chi.
+        glitchy_mu (array, float): The array of measured absorption coefficient values
+        corresponding to the energy values in e. May contain glitches.
+        sig_val (float, default=0.025): The parameter passed to deglitch(). See Grubbs_test()
+        for details.
+        visualize (bool, default=false): If true, will make plots depicting the deglitcing 
+        process. Visualization is helpful for testing and debuggin, but not necessary for
+        running the function.
+        
+        Returns:
+        deglitched mu (array, float): The array of deglitched absorption coefficient values. 
+        """    
         
         # Get the first transformation to chi
         k, chi1 = self.transform.forward(e, glitchy_mu)
@@ -383,7 +504,7 @@ class Mu_Deglitcher():
             
         # Visualization
         if visualize:
-            plt.figure(3)
+            plt.figure(2)
             plt.plot(e, glitchy_mu)
             plt.plot(e, mu2)
         
@@ -401,7 +522,7 @@ class Mu_Deglitcher():
             point_glitches,
             step_glitches)=self.deglitch(chi3, sig_val, visualize)
             
-            plt.figure(4)
+            plt.figure(3)
             plt.plot(k, chi3)
             plt.plot(k, deglitched_chi)
             plt.scatter(k[:-self.out_size], predictions, s=8, color='r')
