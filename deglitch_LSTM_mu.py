@@ -131,8 +131,9 @@ class Mu_to_Chi_Transform():
 
     def reverse(self, chi, mu):
         """
-        Transform chi back to mu using the parameters used to transform
-        mu to chi.
+        Transform a modified chi back to mu using the parameters used to 
+        transform mu to chi. Mu is required in order to stitch the pre-edge
+        mu to the transformed chi.
         """
         
         y=np.copy(chi)
@@ -151,7 +152,7 @@ class Mu_Deglitcher():
     
     def __init__(self):
         
-        # Load the model
+        # Load the LSTM model with the required parameters.
           
         hidden_size=32        
         batch_size=1
@@ -534,6 +535,7 @@ if __name__=="__main__":
     ind=np.random.randint(0,len(MU))
     mu=MU[ind]
     e=E[ind]
+    # Make sure it doesn't load an empty scan.
     while mu[0]!=mu[0] or max(mu)==0:
         ind=np.random.randint(0,len(MU))
         mu=MU[ind]
@@ -566,8 +568,9 @@ if __name__=="__main__":
     t0=time.time()
     deglitched_mu = Deglitcher.run_twostage(e, glitchy, sig_val=0.01, visualize=True)
     t1=time.time()
+    print("That took %.3f seconds."%(t1-t0))
     plt.figure(1)
     plt.plot(e, deglitched_mu, label='Deglitched')
     plt.legend()
-    print("That took %.3f seconds."%(t1-t0))
+    
     
