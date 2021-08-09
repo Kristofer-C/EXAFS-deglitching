@@ -1,7 +1,9 @@
 # -*- coding: utf-8 -*-
 """
-Creates a LSTM to take in chunk of values from a sequence and predict the next
-value in the sequence.
+Creates and trains a LSTM to take in chunks of values from a sequence and predict 
+the next value in the sequence. It is currently set up to take in chi(k) EXAFS
+data to be able to make next-point predictions on chi. This is intended to be 
+used as an automatic glitch detection and correction algorithm.
 """
 
 import numpy as np
@@ -18,6 +20,15 @@ import time
 def chunk_sequence(sequence, chunk_size=10, n_leave=0):
     """
     Forms a tensor of chunks of consecutive values from the sequence.
+    
+    Parameters:
+    sequence (float, pytorch tensor): The sequence of values to be chunked
+    chunk_size (int): The number of points in each chunk.
+    n_leave (int, default=0): The number of points in the sequence at the end to 
+    leave out of the list of chunks.
+    
+    Returns:
+    chunks (float, pytorch tensor): The list of chunks.
     """
     
     chunks=[]
@@ -27,38 +38,61 @@ def chunk_sequence(sequence, chunk_size=10, n_leave=0):
     return torch.stack(chunks)
 
 
-# Turns out that LSTM training is batchable
-# So here's a standard dataset class
-# The transform is not optional because it is necessary
-# for the signals to be in a different form for the LSTM
+
 class CleanData(Dataset):
+    """
+    A typical dataset class for training an algorithm. 
+    
+    __init__ initializes variables used in other functions of the class.
+    
+    __len__ returns the number of signals in the given directory
+    
+    __getitem__ returns the chunked signal and corresponding labels
+    of the signal corresponding to index idx.
+    """
     
     def __init__(self,
                  signals_dir,
-                 #signals_file,
                  chunk_size,
-                 transform,
-                 device):
+                 transform):
+        """
+        Initialize variables for the class. 
+        
+        signals_dir (str): The path to the folder containing each signal
+        in a .txt file.
+        transform (python class): The class used to transform the signals
+        into chunks
+        chunk_size (int): The number of points use to form each chunk.
+        chilist (list, str): The full list of .txt file names containing the signals.
+        """
         
         self.signals_dir=signals_dir
         self.transform=transform
         self.chunk_size=chunk_size
         self.chilist=os.listdir(signals_dir)
-        self.device=device
         
-        #self.dat=np.genfromtxt(signals_dir)
         
     def __len__(self):
+        """Returns the number of available signals for training or testing
+        in the given directory."""
         
         return len(self.chilist)
-        #return len(self.dat)
-    
+
     
     def __getitem__(self, idx):
+        """
+        Loads the signal corresponding to the index idx in 
+        the list of signals chilist, and forms it into chunks
+        of size chunk_size. 
+        
+        Returns the list of chunks for that signal and the list
+        of labels (of the same length as chunks) which are just
+        the points in the signals immediately following the end
+        of the chunks."""
         
         signal=torch.from_numpy(np.genfromtxt(os.path.join(self.signals_dir, 
-                                            self.chilist[idx])))#.to(self.device)
-        #signal=torch.from_numpy(self.dat[idx])
+                                            self.chilist[idx])))
+
         chunks, labels=self.transform(signal)
             
         return chunks, labels
@@ -66,15 +100,15 @@ class CleanData(Dataset):
     
 class NoiseAndChunkTransform:
     """
-    Normalizes the spectrum, forms the seuqnce into chunks of
-    consecutive values, and returns the tensor of chunks and the tensor
+    Normalizes the spectrum, adds an amount of gaussian noise,
+    forms the seuqnce into chunks of consecutive values, 
+    and returns the tensor of chunks and the tensor
     of labels (values to be predicted by the model).
     """
     
-    def __init__(self, chunk_size, noise_std, device):
+    def __init__(self, chunk_size, noise_std):
         self.chunk_size=chunk_size
         self.noise_std=noise_std
-        self.device=device
         
     def __call__(self, y):
         
@@ -82,7 +116,7 @@ class NoiseAndChunkTransform:
         y/=(max(y)-min(y))
         
         # Add a small amount of noise
-        noisy=y+(torch.randn(len(y))*self.noise_std)#.to(self.device)
+        noisy=y+(torch.randn(len(y))*self.noise_std)
         
         # Form the chunks, leaving one value at the end for the last prediction
         chunks=chunk_sequence(noisy, self.chunk_size, 1)
@@ -95,6 +129,15 @@ class NoiseAndChunkTransform:
 
 
 class LSTMModel(nn.Module):
+    """
+    Defines the machine learning model that uses one or more LSTM cells.
+    
+    __init__ initializes values and the model structure.
+    
+    forward calls the model on a tensor.
+    
+    init_hidden initializes the hidden state of the LSTM to zeros.
+    """
     def __init__(self, 
                  in_size, 
                  hidden_size, 
@@ -106,6 +149,36 @@ class LSTMModel(nn.Module):
                  device,
                  batch_first=True):
         super().__init__()
+        """Initializes the model structure, and the values and parameters used to
+        call the model.
+        
+        in_size (int): The number of points in a sequence used to generate an output 
+        from the LSTM cell. In practice, this is equal to chunk_size.
+        
+        hidden_size (int): The number of points used in the hidden state of the LSTM cell
+        
+        out_size (int): The number of values to be output by the model in a single call.
+        
+        batch_size (int): The size of the batches that are to be used for training 
+        and testing
+        
+        num_layers (int): The number of LSTM layers used in the LSTM cell.
+        
+        drop_prob (float in [0,1]): The fraction of of values in the hidden states
+        that get randomly set to zero during a forward call.
+        
+        bidirectional (bool): If true, the LSTM cell becomes bidirectional
+        
+        device (str): The device on which the computations are being performed.
+        
+        batch_first (bool, default=True): Specifies whether the batch size is the 
+        first dimension of the input tensor.
+        
+        lstm (nn module): The LSTM cell defined with the paramters above.
+        
+        linear (nn module): The fully connected linear layer that takes
+        the hidden state in the LSTM and outputs out_size number of values.        
+        """
         
         self.device=device
         
@@ -121,17 +194,10 @@ class LSTMModel(nn.Module):
                             dropout=drop_prob,
                             bidirectional=bidirectional,
                             batch_first=batch_first)
-        
-        self.conv=nn.Sequential(
-            nn.Conv1d(1, 16, kernel_size=2, padding=1),
-            nn.ReLU(),
-            nn.MaxPool1d(2),
-            nn.Conv1d(16, 16, kernel_size=2, padding=1),
-            nn.ReLU(),
-            nn.MaxPool1d(in_size//2)
-            )
+
         
         self.linear = nn.Sequential(
+                # Option to include a dropout rate between the LSTM and the linear layers.
                 #nn.Dropout(p=drop_prob),
                 nn.Linear((1+self.bidirectional)*self.hidden_size, 16),
                 nn.Tanh(),
@@ -139,9 +205,9 @@ class LSTMModel(nn.Module):
         
         self.init_hidden(batch_size)
         
-    def forward(self, x):
         
-        #out = self.conv(x.view(len(x), len(x[0]), 1, -1)).squeeze()
+    def forward(self, x):
+        """Calls the model and returns the ouptut values."""
         
         out, self.hidden_state = self.lstm(
                                     x, self.hidden_state)
@@ -150,11 +216,19 @@ class LSTMModel(nn.Module):
             [h.detach() for h in self.hidden_state])
         
         out = self.linear(out)
+        
+        # Add the average of the last two points in the chunk to the
+        # output value so that the model doesn't have to predict
+        # the actual next value in the sequence, but just the change
+        # from the last two points. This makes the predictions more 
+        # likely to be close to the previous value, which is expected
+        # for smoothly changing data like EXAFS.
         return out.squeeze()+x[:,:,-2:].mean(dim=-1)
     
     # self.hidden_state contains both the hidden state and the cell state
     # of the LSTM cell
     def init_hidden(self, batch_size):
+        """Sets the hidden and cell states of the LSTM cell to zero."""
         
         self.hidden_state = (
             torch.zeros(((1+self.bidirectional)*self.num_layers,
@@ -177,23 +251,32 @@ def train_loop(dataloader, model, loss_func, optimizer, device):
     """
     
     size=len(dataloader.dataset)
+    # Keep track of the loss from each batch.
     losses=[]
     
+    # Iterate through the batches
+    # X is the tensor of chunked signals,
+    # lb is the tensor with the corresponding labels
     for batch, (X, lb) in enumerate(dataloader):
         
+        # Initialize the state of the LSTM to zero with the 
+        # appropriate batch_size
         model.init_hidden(len(X))
+        # Cast the chunks and labels to the device
         X, lb = X.to(device), lb.to(device)
+        # Run the model, making predictions for the points following the chunks
         prediction=model(X.float())
+        # Compute the loss between the predictions and the labels.
         loss=loss_func(prediction.squeeze(), lb.float().squeeze())
         
-        # Take a step
+        # Take a step in the training.
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
         
-        loss=loss.item()#/len(X)
+        loss=loss.item()
         
-        # Every 25 batches, print the status
+        # After every tenth of the training set, print the status
         if (batch+1)%max(1, len(dataloader)//10)==0:
             current = batch*len(X)
             print("Loss: %.4f, %d/%d"%(loss, current, size))
@@ -206,7 +289,6 @@ def train_loop(dataloader, model, loss_func, optimizer, device):
 def test_loop(dataloader, model, loss_func, device):
     size=len(dataloader.dataset)
     test_loss=0
-    
     """
     Tests the model with one iteration through the entire testing set in batches.
     Returns the average testing loss.
@@ -232,10 +314,7 @@ if __name__=="__main__":
     device= torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     #device='cpu'
     print("Device: %s"%device)
-    
-    #train_file = "chi_train.txt"
-    #valid_file = "chi_valid.txt"
-    
+
     train_dir = "chi_train"
     valid_dir = "chi_validation"
     
@@ -247,6 +326,7 @@ if __name__=="__main__":
     # The size of the noise added to the training data
     noise_std=0.01
     
+    # Define the datasets for training and cross validation
     train_dat=CleanData(train_dir, 
                         chunk_size, 
                         NoiseAndChunkTransform(chunk_size, noise_std, device),
@@ -256,6 +336,7 @@ if __name__=="__main__":
                        NoiseAndChunkTransform(chunk_size, noise_std, device),
                        device)
     
+    # Create the pytorch dataloaders
     batch_size=64
     train_dl = DataLoader(train_dat, 
                           batch_size=batch_size, 
@@ -265,12 +346,11 @@ if __name__=="__main__":
                          batch_size=batch_size, 
                          shuffle=True)
     
-
+    # Define the model
     # The length of the cell state and hidden state vectors in the LSTM cell
     hidden_size=32
     # The number of next values in the sequence to predict
     out_size=1
-
     bidirectional=False
     num_layers=4
     drop_prob=0.5
@@ -284,10 +364,10 @@ if __name__=="__main__":
                     device).to(device)
     
     
-
-
+    # Use the mean squared error as a loss function
     loss_func=nn.MSELoss(reduction="mean")
     
+    # Define the optimizer and scheduler
     learning_rate=1e-2
     optimizer=torch.optim.Adam(model.parameters(), lr=learning_rate)
     #optimizer=torch.optim.SGD(model.parameters(), lr=learning_rate, momentum=0.7)
@@ -301,12 +381,15 @@ if __name__=="__main__":
     
     epochs=10
     
+    # Keep track of the training and testing losses
     train_losses=[]
     test_losses=[]
     
+    # Keep track of how long each epoch and the whole training process takes.
     t0=time.time()
     t=t0
     
+    # Run for epoch number of times through the training and testing sets.
     for epoch in range(epochs):
         print("===================================================")
         print("Epoch: %d"%(epoch+1))
@@ -328,9 +411,11 @@ if __name__=="__main__":
         
     print("Done!")
     print("Total time: %.3f seconds"%(t-t0))
-        
+       
+    # Save the newly trained model
     torch.save(model.state_dict(), "lstm_chi1.pth")
 
+    # Plot the test and training losses as a function of the epochs.
     epo=list(range(1,epochs+1))
     plt.plot(epo, train_losses, epo, test_losses)
 
