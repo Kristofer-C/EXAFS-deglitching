@@ -1,7 +1,9 @@
 # -*- coding: utf-8 -*-
 """
-Creates a LSTM to take in chunk of values from a sequence and predict the next
-value in the sequence.
+Creates and trains a LSTM to take in chunks of values from a sequence and predict 
+the next value in the sequence. It is currently set up to take in mu(E) EXAFS
+data to be able to make next-point predictions. This is intended to be 
+used as an automatic glitch detection and correction algorithm.
 """
 
 import numpy as np
@@ -19,7 +21,17 @@ from scipy.interpolate import LSQUnivariateSpline
 def chunk_sequence(sequence, chunk_size=10, n_leave=0):
     """
     Forms a tensor of chunks of consecutive values from the sequence.
+    
+    Parameters:
+    sequence (float, pytorch tensor): The sequence of values to be chunked
+    chunk_size (int): The number of points in each chunk.
+    n_leave (int, default=0): The number of points in the sequence at the end to 
+    leave out of the list of chunks.
+    
+    Returns:
+    chunks (float, pytorch tensor): The list of chunks.
     """
+    
     
     chunks=[]
     for i in range(0,len(sequence)-chunk_size+1-n_leave):
@@ -28,11 +40,18 @@ def chunk_sequence(sequence, chunk_size=10, n_leave=0):
     return torch.stack(chunks)
 
 
-# Turns out that LSTM training is batchable
-# So here's a standard dataset class
-# The transform is not optional because it is necessary
-# for the signals to be in a different form for the LSTM
 class CleanData(Dataset):
+    
+    """
+    A typical dataset class for training an algorithm. 
+    
+    __init__ initializes variables used in other functions of the class.
+    
+    __len__ returns the number of signals in the given directory
+    
+    __getitem__ returns the chunked signal and corresponding labels
+    of the signal corresponding to index idx.
+    """
     
     def __init__(self,
                  signals_dir,
@@ -40,6 +59,19 @@ class CleanData(Dataset):
                  chunk_size,
                  transform,
                  device):
+        """
+        Initialize variables for the class. 
+        
+        signals_dir (str): The path to the folder containing each signal
+        in a .txt file.
+        
+        transform (python class): The class used to transform the signals
+        into chunks
+        
+        chunk_size (int): The number of points use to form each chunk.
+        
+        signal_list (list, str): The full list of .txt file names containing the signals.
+        """
         
         self.signals_dir=signals_dir
         self.transform=transform
@@ -49,13 +81,25 @@ class CleanData(Dataset):
         
         #self.dat=np.genfromtxt(signals_dir)
         
-    def __len__(self):
+    def __len__(self):        
+        """Returns the number of available signals for training or testing
+        in the given directory."""
         
         return len(self.signal_list)
-        #return len(self.dat)
+       
     
     
     def __getitem__(self, idx):
+        """
+        Loads the signal corresponding to the index idx in 
+        the list of signals chilist, and forms it into chunks
+        of size chunk_size. 
+        
+        Returns the list of chunks for that signal and the list
+        of labels (of the same length as chunks) which are just
+        the points in the signals immediately following the end
+        of the chunks.
+        """
         
         signal=torch.from_numpy(np.genfromtxt(os.path.join(self.signals_dir, 
                                             self.signal_list[idx])))
@@ -67,8 +111,9 @@ class CleanData(Dataset):
     
 class NoiseAndChunkTransform:
     """
-    Normalizes the spectrum, forms the seuqnce into chunks of
-    consecutive values, and returns the tensor of chunks and the tensor
+    Normalizes the spectrum, adds an amount of gaussian noise,
+    forms the seuqnce into chunks of consecutive values, 
+    and returns the tensor of chunks and the tensor
     of labels (values to be predicted by the model).
     """
     
@@ -108,6 +153,15 @@ class NoiseAndChunkTransform:
 
 
 class LSTMModel(nn.Module):
+    """
+    Defines the machine learning model that uses one or more LSTM cells.
+    
+    __init__ initializes values and the model structure.
+    
+    forward calls the model on a tensor.
+    
+    init_hidden initializes the hidden state of the LSTM to zeros.
+    """
     def __init__(self, 
                  in_size, 
                  hidden_size, 
@@ -119,6 +173,37 @@ class LSTMModel(nn.Module):
                  device,
                  batch_first=True):
         super().__init__()
+        
+        """Initializes the model structure, and the values and parameters used to
+        call the model.
+        
+        in_size (int): The number of points in a sequence used to generate an output 
+        from the LSTM cell. In practice, this is equal to chunk_size.
+        
+        hidden_size (int): The number of points used in the hidden state of the LSTM cell
+        
+        out_size (int): The number of values to be output by the model in a single call.
+        
+        batch_size (int): The size of the batches that are to be used for training 
+        and testing
+        
+        num_layers (int): The number of LSTM layers used in the LSTM cell.
+        
+        drop_prob (float in [0,1]): The fraction of of values in the hidden states
+        that get randomly set to zero during a forward call.
+        
+        bidirectional (bool): If true, the LSTM cell becomes bidirectional
+        
+        device (str): The device on which the computations are being performed.
+        
+        batch_first (bool, default=True): Specifies whether the batch size is the 
+        first dimension of the input tensor.
+        
+        lstm (nn module): The LSTM cell defined with the paramters above.
+        
+        linear (nn module): The fully connected linear layer that takes
+        the hidden state in the LSTM and outputs out_size number of values.        
+        """
         
         self.device=device
         
@@ -221,7 +306,6 @@ def train_loop(dataloader, model, loss_func, optimizer, device):
 def test_loop(dataloader, model, loss_func, device):
     size=len(dataloader.dataset)
     test_loss=0
-    
     """
     Tests the model with one iteration through the entire testing set in batches.
     Returns the average testing loss.
