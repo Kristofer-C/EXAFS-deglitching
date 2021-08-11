@@ -12,6 +12,10 @@ The LSTM has a hard time making predictions on mu as it is, so mu is transformed
 
 Define an object with the Mu_Deglitcher class. Use one of .run() or .run_twostage() with their corresponding arguments and parameters to return the deglitched signal. Inline comments are detailed. Follow the example given.
 
+### Dependencies
+
+Imports LSTMModel from LSTM_on_mu. This is the class that defines the model used for making predictions. When loading the model, deglitch_mu.py uses the file lstm_mu.pth to load all the trained weights and biases. The hyperparamters for the model are defined in the Mu_Deglitcher class and can not be changed for the model to load. 
+
 ### Notes
 
 It is recommended to use .run_twostage() because it more robustly detects and fixes glitches, particularly when large step glitches are present.
@@ -26,10 +30,12 @@ The machine learning algorithm is trained on an energy sampling rate that loosel
 
 The changing sampling rates are not too problematic for the data used for testing, but for robust implementation, something in a future verion should account for the different sampling rates. Some form of upsampling may be useful.
 
+# 2. LSTM_on_mu.py
 
-# 2. deglitch_mu_w_chi_transform.py
+
+# 3. deglitch_mu_w_chi_transform.py
 
 Functions identically to deglitch_mu.py, but uses a complete transformation of mu to chi before making predictions with the LSTM. deglitch_mu.py almost transforms to chi anyway, but has a few fewer restrictions. One of them being that the cropping point can be earlier than e0.
 
 
-# 3. descriminate_pixels.py
+# 4. descriminate_pixels.py
