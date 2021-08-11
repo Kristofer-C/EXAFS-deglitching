@@ -207,7 +207,7 @@ class Mu_Deglitcher():
                              drop_prob,
                              bidirectional,
                              self.device).to(self.device)
-        self.model.load_state_dict(torch.load("lstm_mu2.pth",
+        self.model.load_state_dict(torch.load("lstm_mu.pth",
                                               map_location=torch.device(self.device)))
         self.model.init_hidden(batch_size)
         
