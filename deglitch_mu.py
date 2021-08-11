@@ -808,8 +808,8 @@ if __name__=="__main__":
     #m = nn.Upsample(size=int(1*len(clean)), mode='linear')
     #clean=m(clean.view(1,1,-1)).squeeze().numpy()
     #e=m(e.view(1,1,-1).float()).squeeze().numpy()
-    glitchy=clean+np.random.normal(0,(max(clean)-min(clean))/200, len(clean))
-
+    #glitchy=clean+np.random.normal(0,(max(clean)-min(clean))/200, len(clean))
+    glitchy=clean.copy()
     
     #glitchy=np.copy(mu)
          
