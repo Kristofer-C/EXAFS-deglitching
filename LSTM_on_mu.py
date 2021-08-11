@@ -344,7 +344,7 @@ if __name__=="__main__":
     print("Done!")
     print("Total time: %.3f seconds"%(t-t0))
         
-    torch.save(model.state_dict(), "lstm_mu2.pth")
+    torch.save(model.state_dict(), "lstm_mu.pth")
 
     epo=list(range(1,epochs+1))
     plt.plot(epo, train_losses, epo, test_losses)
