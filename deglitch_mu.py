@@ -19,7 +19,7 @@ import torch
 import scipy.stats as stats
 from scipy.interpolate import LSQUnivariateSpline
 
-from LSTM_on_chi import LSTMModel
+from LSTM_on_mu import LSTMModel
 
 
 
