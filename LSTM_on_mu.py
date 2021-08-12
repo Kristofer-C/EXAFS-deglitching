@@ -22,11 +22,16 @@ def chunk_sequence(sequence, chunk_size=10, n_leave=0):
     """
     Forms a tensor of chunks of consecutive values from the sequence.
     
+    
     Parameters:
+    
     sequence (float, pytorch tensor): The sequence of values to be chunked
+    
     chunk_size (int): The number of points in each chunk.
+    
     n_leave (int, default=0): The number of points in the sequence at the end to 
     leave out of the list of chunks.
+    
     
     Returns:
     chunks (float, pytorch tensor): The list of chunks.
@@ -45,11 +50,11 @@ class CleanData(Dataset):
     """
     A typical dataset class for training an algorithm. 
     
-    __init__ initializes variables used in other functions of the class.
+    __init__() initializes variables used in other functions of the class.
     
-    __len__ returns the number of signals in the given directory
+    __len__() returns the number of signals in the given directory
     
-    __getitem__ returns the chunked signal and corresponding labels
+    __getitem__() returns the chunked signal and corresponding labels
     of the signal corresponding to index idx.
     """
     
@@ -81,18 +86,18 @@ class CleanData(Dataset):
         
         #self.dat=np.genfromtxt(signals_dir)
         
+        
     def __len__(self):        
         """Returns the number of available signals for training or testing
         in the given directory."""
         
         return len(self.signal_list)
-       
-    
+      
     
     def __getitem__(self, idx):
         """
         Loads the signal corresponding to the index idx in 
-        the list of signals chilist, and forms it into chunks
+        the list of signals signal_list, and forms it into chunks
         of size chunk_size. 
         
         Returns the list of chunks for that signal and the list
@@ -103,7 +108,6 @@ class CleanData(Dataset):
         
         signal=torch.from_numpy(np.genfromtxt(os.path.join(self.signals_dir, 
                                             self.signal_list[idx])))
-        #signal=torch.from_numpy(self.dat[idx])
         chunks, labels=self.transform(signal)
             
         return chunks, labels
@@ -111,41 +115,48 @@ class CleanData(Dataset):
     
 class NoiseAndChunkTransform:
     """
-    Normalizes the spectrum, adds an amount of gaussian noise,
-    forms the seuqnce into chunks of consecutive values, 
-    and returns the tensor of chunks and the tensor
-    of labels (values to be predicted by the model).
+    Normalizes and transforms the spectrum, adds an
+    amount of gaussian noise, forms the seuqnce into
+    chunks of consecutive values, and returns the
+    tensor of chunks and the tensor of labels
+    (values to be predicted by the model).
     """
     
     def __init__(self, chunk_size, noise_std, device):
-        self.chunk_size=chunk_size
-        self.noise_std=noise_std
-        self.device=device
+        self.chunk_size=chunk_size # The number of points to use in each chunk.
+        self.noise_std=noise_std # The standard deviation of the gaussian noise
+            # to be added
         
     def __call__(self, y):
         
-        # Enforce the the tensor has values with a range of 1
+        # Upsample the data to mimic increased energy sampling rate
+        # in real data.
         m = nn.Upsample(size=int(2*len(y)), mode='linear')
         y=m(y.view(1,1,-1)).squeeze()
         x=np.arange(len(y))
+        
+        # Enforce that the tensor has values with a range of 1
         y=(y-min(y))/(max(y)-min(y))
+        
+        # Fit a spline to the signal with four evenly spaced knots 
         t=x[len(x)//5::len(x)//5]
         spl= LSQUnivariateSpline(x, y, t)
-        y=(y-spl(x))*np.exp(-2*x*x*1e-5)
-        clean=y.clone()
-        y+=(torch.randn(len(y))*self.noise_std)
         
-        # Add a small amount of noise
-        #y=y[50:]
-        #x=np.arange(len(y))
-        #a, b = np.polyfit(x, y, 1)
-        #y-=a*x+b
-        #y/=max(y)-min(y)
+        # Subtract the spline so that the oscillations are centered 
+        # around zero.
+        # Exponential decay mimics the deBye Waller factors
+        y=(y-spl(x))*np.exp(-2*x*x*1e-2*(14/len(x))**2)
+        clean=y.clone()
+        
+        # Add a small amount of noise.
+        y+=(torch.randn(len(y))*self.noise_std)
         
         # Form the chunks, leaving one value at the end for the last prediction
         chunks=chunk_sequence(y, self.chunk_size, 1)
         
-        # The labels are just the value that immediately follows the chunk
+        # The labels are just the value that immediately follows the chunk.
+        # The noiseless points are used so that the model may learn
+        # to ignore the noise. Noise is not predictable anyway.
         labels=clean[chunk_size:]
 
         return chunks, labels
@@ -173,8 +184,8 @@ class LSTMModel(nn.Module):
                  device,
                  batch_first=True):
         super().__init__()
-        
-        """Initializes the model structure, and the values and parameters used to
+        """
+        Initializes the model structure, and the values and parameters used to
         call the model.
         
         in_size (int): The number of points in a sequence used to generate an output 
@@ -192,7 +203,7 @@ class LSTMModel(nn.Module):
         drop_prob (float in [0,1]): The fraction of of values in the hidden states
         that get randomly set to zero during a forward call.
         
-        bidirectional (bool): If true, the LSTM cell becomes bidirectional
+        bidirectional (bool): If true, the LSTM cell becomes bidirectional.
         
         device (str): The device on which the computations are being performed.
         
@@ -221,15 +232,7 @@ class LSTMModel(nn.Module):
                             bidirectional=bidirectional,
                             batch_first=batch_first)
         
-        self.conv=nn.Sequential(
-            nn.Conv1d(1, 16, kernel_size=2, padding=1),
-            nn.ReLU(),
-            nn.MaxPool1d(2),
-            nn.Conv1d(16, 16, kernel_size=2, padding=1),
-            nn.ReLU(),
-            nn.MaxPool1d(in_size//2)
-            )
-        
+       
         self.linear = nn.Sequential(
                 #nn.Dropout(p=drop_prob),
                 nn.Linear((1+self.bidirectional)*self.hidden_size, 16),
@@ -239,9 +242,9 @@ class LSTMModel(nn.Module):
         
         self.init_hidden(batch_size)
         
-    def forward(self, x):
         
-        #out = self.conv(x.view(len(x), len(x[0]), 1, -1)).squeeze()
+    def forward(self, x):
+        """Calls the model and returns the output values."""
         
         out, self.hidden_state = self.lstm(
                                     x, self.hidden_state)
@@ -250,6 +253,13 @@ class LSTMModel(nn.Module):
             [h.detach() for h in self.hidden_state])
         
         out = self.linear(out)
+        
+        # Add the average of the last two points in the chunk to the
+        # output value so that the model doesn't have to predict
+        # the actual next value in the sequence, but just the change
+        # from the last two points. This makes the predictions more 
+        # likely to be close to the previous value, which is expected
+        # for smoothly changing data like EXAFS.
         return out.squeeze()+x[:,:,-2:].mean(dim=-1)
     
     # self.hidden_state contains both the hidden state and the cell state
@@ -265,11 +275,7 @@ class LSTMModel(nn.Module):
                          self.hidden_size)).to(self.device))
         
         
-    
-
-
-
-
+        
 def train_loop(dataloader, model, loss_func, optimizer, device):
     """
     Trains the model with one iteration through the entire dataset in batches.
@@ -277,23 +283,32 @@ def train_loop(dataloader, model, loss_func, optimizer, device):
     """
     
     size=len(dataloader.dataset)
+    # Keep track of the loss from each batch.
     losses=[]
     
+    # Iterate through the batches
+    # X is the tensor of chunked signals,
+    # lb is the tensor with the corresponding labels
     for batch, (X, lb) in enumerate(dataloader):
         
+        # Initialize the state of the LSTM to zero with the 
+        # appropriate batch_size
         model.init_hidden(len(X))
+        # Cast the chunks and labels to the device
         X, lb = X.to(device), lb.to(device)
+        # Run the model, making predictions for the points following the chunks
         prediction=model(X.float())
+        # Compute the loss between the predictions and the labels.
         loss=loss_func(prediction.squeeze(), lb.float().squeeze())
         
-        # Take a step
+        # Adjust the weights and biases of the model
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
         
-        loss=loss.item()#/len(X)
+        loss=loss.item()
         
-        # Every 25 batches, print the status
+        # After every tenth of the training set, print the status
         if (batch+1)%max(1, len(dataloader)//10)==0:
             current = batch*len(X)
             print("1000x Loss: %.4f, %d/%d"%(1000*loss, current, size))
@@ -328,13 +343,11 @@ def test_loop(dataloader, model, loss_func, device):
         
 if __name__=="__main__":
     
+    # Define the device to be used. 
     device= torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     #device='cpu'
     print("Device: %s"%device)
-    
-    #train_file = "chi_train.txt"
-    #valid_file = "chi_valid.txt"
-    
+
     train_dir = "mu_train"
     valid_dir = "mu_validation"
     
@@ -346,6 +359,7 @@ if __name__=="__main__":
     # The size of the noise added to the training data
     noise_std=0.02
     
+    # Define the training and testing datasets
     train_dat=CleanData(train_dir, 
                         chunk_size, 
                         NoiseAndChunkTransform(chunk_size, noise_std, device),
@@ -355,6 +369,7 @@ if __name__=="__main__":
                        NoiseAndChunkTransform(chunk_size, noise_std, device),
                        device)
     
+    # Define the coresponding dataloaders
     batch_size=64
     train_dl = DataLoader(train_dat, 
                           batch_size=batch_size, 
@@ -370,9 +385,22 @@ if __name__=="__main__":
     # The number of next values in the sequence to predict
     out_size=1
 
+    # Whether the LSTM cells are bidirectional. 
+    # Bidirectional LSTMs use future context to make
+    # predictions. I tried it once and it did not seem
+    # to work well.
     bidirectional=False
+    
+    # The number of LSTM cells to use
     num_layers=2
+    
+    # The fraction of values in the hidden states that are set to
+    # zero during the forward calls. This enforces that the model 
+    # stores the important information multiple times, and acts
+    # as regularization against over fitting.
     drop_prob=0.5
+    
+    # Define the model
     model=LSTMModel(chunk_size, 
                     hidden_size, 
                     out_size, 
@@ -382,11 +410,10 @@ if __name__=="__main__":
                     bidirectional,
                     device).to(device)
     
-    
-
-
+    # Use mean squared error as the loss function.
     loss_func=nn.MSELoss(reduction="mean")
     
+    # Define the learning rate, optimizer, and scheduler.
     learning_rate=1e-2
     optimizer=torch.optim.Adam(model.parameters(), lr=learning_rate)
     #optimizer=torch.optim.SGD(model.parameters(), lr=learning_rate, momentum=0.7)
@@ -398,14 +425,21 @@ if __name__=="__main__":
     #                                                steps_per_epoch=10,
     #                                                epochs=epochs)
     
+    # Number of full iterations through the entire testing and 
+    # trainiing data.
     epochs=5
     
+    # Lists containing the loss values after each epoch.
     train_losses=[]
     test_losses=[]
     
+    # Keep track of the duration of each epoch and the entire 
+    # trianing process.
     t0=time.time()
     t=t0
     
+    # Train and test the model epoch number of times, while 
+    # displaying the intermediate results along the way.
     for epoch in range(epochs):
         print("===================================================")
         print("Epoch: %d"%(epoch+1))
@@ -428,8 +462,11 @@ if __name__=="__main__":
     print("Done!")
     print("Total time: %.3f seconds"%(t-t0))
         
+    # Save the model dictionary.
     torch.save(model.state_dict(), "lstm_mu.pth")
 
+    # Plot the training and testing losses thorughout
+    # the epochs.
     epo=list(range(1,epochs+1))
     plt.plot(epo, train_losses, epo, test_losses)
 
