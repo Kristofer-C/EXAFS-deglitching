@@ -16,16 +16,21 @@ def norm_transform(Y):
     where that is checked and taken care of.
     """
     
+    # The list of normalized signals
     normY=[]
     
-    for i, y in enumerate(Y):
+    for y in Y:
         
-
         mn=min(y)
         mx=max(y)
+        
+        # If the signal is a flat line or the maximum is nan,
+        # just set the signal to be all zeros.
         if mn==mx or mx!=mx:
             y=np.zeros_like(y)
         else:
+            # If the signal has information in it, rescale it to
+            # go from 0 to 1.
             y=(y-mn)/(mx-mn)
         
         normY.append(y)  
@@ -36,26 +41,39 @@ def norm_transform(Y):
 def find_good_pix(mus, min_samples=4, eps=0.05):    
     """
     Sorts the normalized pixels scans by clustering the mean and standard 
-    deviation of the consecutive differences of each. Returns the list of
+    deviation of the consecutive differences of each. Returns the indeces of
     good pixel scans.
     """
     
+    # Normalize all the pixel scans, leaving the flat lines and nans as zeros
     normmus=norm_transform(mus)
+    
+    # Get the lists of consecutive differences, and calculate the means
+    # and standard deviations.
+    # With the lists of means and standard deviations, rescale them
+    # such that the lowest is zero and the highest is one.
     diffs=normmus[:,1:]-normmus[:,:-1]
     means=diffs.mean(axis=1)
     normmns=(means-min(means))/(max(means)-min(means))
     stds=diffs.std(axis=1)
     normstds=(stds-min(stds))/(max(stds)-min(stds))
     
+    # Perform DBSCAN clustering on the scans in the
+    # means/standard deviations space.
     X=np.stack([normstds, normmns], axis=1)
     db=DBSCAN(eps=eps, min_samples=min_samples).fit(X)
+    
+    # The list of labels for each scan describing which 
+    # cluster it beloings to. A label of -1 is no cluster.
+    # Clusters are numbered starting from zero.
     Dlabels=db.labels_
     
-    # Visualization for debugging
+    # Visualization of the clustering for debugging
     #plt.figure(4)
     #plt.scatter(normmns[Dlabels!=-1], normstds[Dlabels!=-1], color='b', alpha=0.5)
     #plt.scatter(normmns[Dlabels==-1], normstds[Dlabels==-1], color='k', alpha=0.5)
     
+    # Return the indeces of the scans that belong to a cluster.
     return np.arange(len(mus))[Dlabels!=-1]
 
 
@@ -63,7 +81,8 @@ def find_good_pix(mus, min_samples=4, eps=0.05):
 def similarity_score(Y):
     """
     The average mean squared error between the signals in the group Y and the
-    average of the signals in group Y.
+    average of the signals in group Y. The similarity score describes how
+    Similar the clustered scans are to each other.
     """
     
     return sum(sum((Y-Y.mean(axis=0))**2))/len(Y)
@@ -113,8 +132,13 @@ if __name__=="__main__":
     es=E[start*NPIX:(start+1)*NPIX]
     mus=np.stack(MU[start*NPIX:(start+1)*NPIX])
     
+    
     # Run the three functions
+    
+    # Normalize the scans
     normmus=norm_transform(mus)
+    # Get the indeces of the clustered scans
     good_pix_inds=find_good_pix(mus)
+    # Optional: Display the results.
     display_difference(normmus, good_pix_inds)
     
