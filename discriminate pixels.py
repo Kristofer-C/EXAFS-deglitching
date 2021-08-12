@@ -109,11 +109,14 @@ def similarity_score(Y):
 def display_difference(mus, good_pix_inds):
     """
     Displays the effect of the discrimination process by plotting the kept and
-    discrinimated scans in different colours, and showing the summation with
-    and without discrimination. The true final sum will look different because
+    discrinimated normalized scans in different colours, and showing the summation
+    with and without discrimination. The true final sum will look different because
     the pixels will have different weights.
     """
     
+    # It's not ideal to normalize everything here, but this function accounts for
+    # the nans.
+    mus=norm_transform(mus)
     
     plt.figure(1, figsize=(8,6))
     plt.title("Discriminated normalized pixel scans")
