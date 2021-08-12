@@ -11,9 +11,7 @@ from sklearn.cluster import DBSCAN
 def norm_transform(Y):
     """
     Transforms a set of signals Y into such that each signal is rescaled to 
-    go from 0 to 1. This needs to be a separate function from find_good_pix
-    because one of the pixels is always full of nans, and this is the place
-    where that is checked and taken care of.
+    go from 0 to 1. 
     """
     
     # The list of normalized signals
@@ -133,12 +131,10 @@ if __name__=="__main__":
     mus=np.stack(MU[start*NPIX:(start+1)*NPIX])
     
     
-    # Run the three functions
-    
-    # Normalize the scans
-    normmus=norm_transform(mus)
+    # This function is mandatory
     # Get the indeces of the clustered scans
     good_pix_inds=find_good_pix(mus)
+   
     # Optional: Display the results.
-    display_difference(normmus, good_pix_inds)
+    display_difference(mus, good_pix_inds)
     
