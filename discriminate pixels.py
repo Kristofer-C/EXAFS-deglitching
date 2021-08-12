@@ -47,11 +47,13 @@ def find_good_pix(mus, min_samples=4, eps=0.05):
    
     mus (2D array, float): The list of measured mu(E) from the pixels
     
-    min_samples (int, default=4): The minimum number of points a group 
-    must contain in order for it to be considered a cluster.
+    min_samples (int, default=4): A parameter for DBSCAN. The minimum
+    number of points a group must contain in order for it to be 
+    considered a cluster.
     
-    eps (float, default=0.05): The maximum distance between two point 
-    for one to be considered as in the neighborhood of the other.
+    eps (float, default=0.05): A parameter for DBSCAN. The maximum
+    distance between two point for one to be considered as in the
+    neighborhood of the other.
     
     
     Returns:
