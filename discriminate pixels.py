@@ -22,9 +22,9 @@ def norm_transform(Y):
         mn=min(y)
         mx=max(y)
         
-        # If the signal is a flat line or the maximum is nan,
+        # If the signal is a flat line or contains a nan,
         # just set the signal to be all zeros.
-        if mn==mx or mx!=mx:
+        if mn==mx or np.isnan(y).any():
             y=np.zeros_like(y)
         else:
             # If the signal has information in it, rescale it to
