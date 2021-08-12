@@ -41,6 +41,23 @@ def find_good_pix(mus, min_samples=4, eps=0.05):
     Sorts the normalized pixels scans by clustering the mean and standard 
     deviation of the consecutive differences of each. Returns the indeces of
     good pixel scans.
+    
+    
+    Paramters:
+   
+    mus (2D array, float): The list of measured mu(E) from the pixels
+    
+    min_samples (int, default=4): The minimum number of points a group 
+    must contain in order for it to be considered a cluster.
+    
+    eps (float, default=0.05): The maximum distance between two point 
+    for one to be considered as in the neighborhood of the other.
+    
+    
+    Returns:
+    
+    (array, int): The list of indeces of the pixel scans that have been
+    determined to be part of a cluster.
     """
     
     # Normalize all the pixel scans, leaving the flat lines and nans as zeros
