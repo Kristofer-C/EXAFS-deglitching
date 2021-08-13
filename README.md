@@ -36,6 +36,7 @@ The changing sampling rates are not too problematic for the data used for testin
 
 - The hyperparameters for training and the current set of default glitch detection parameters have all been (possibly over-) tuned to work best for the limited set of real world testing data I had access to. This may have resulted in overfitting and results may be worse for different datasets. More testing will be done on more data as soon as possible. 
 
+- Effect of high noise: High noise can give false positives. This can be remedied by training with higher noise, but sacrifices some prediction accuracy for signals with low noise. I will work on this problem.
 
 # 2. LSTM_on_mu.py
 
