@@ -64,4 +64,4 @@ Run the function `find_good_pix()` on a set of pixel scans. The inline comments 
 
 - In the dataset I have been using for testing, one pixel scan always contains a full list of nans. During pixel normalization, if a scan contains a nan, it is set to zeros. In every case I have tested, the zeroed scans are never part of the main cluster, but that might not always be true. In which case, you may end up trying to do analysis with nan values. This may be fixed in a future verion where the labels for the zero and nan scans are set to -1 from the outset. 
 
-A future version may be made where the tuning of eps is interactive and the script displays the clustering plot for different values of eps.
+- A future version may be made where the tuning of eps is interactive and the script displays the clustering plot for different values of eps.
