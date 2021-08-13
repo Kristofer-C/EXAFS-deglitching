@@ -129,17 +129,24 @@ class NoiseAndChunkTransform:
         
     def __call__(self, y):
         
+        
         # Upsample the data to mimic increased energy sampling rate
         # in real data.
-        m = nn.Upsample(size=int(2*len(y)), mode='linear')
-        y=m(y.view(1,1,-1)).squeeze()
+        # Optional split point to only upsample a beginning section of the data
+        split=len(y)#//3
+        m = nn.Upsample(size=int(1.5*split), mode='linear')
+        y1=m(y[:split].view(1,1,-1)).squeeze()
+        y=torch.cat((y1, y[split:]))
+        
+        # Define some x-values used for spline fitting
         x=np.arange(len(y))
         
-        # Enforce that the tensor has values with a range of 1
+        # Enforce that the signal has values with a range of 1
         y=(y-min(y))/(max(y)-min(y))
         
+        dx=len(x)//5
         # Fit a spline to the signal with four evenly spaced knots 
-        t=x[len(x)//5::len(x)//5]
+        t=x[dx-1:-dx:dx]
         spl= LSQUnivariateSpline(x, y, t)
         
         # Subtract the spline so that the oscillations are centered 
@@ -357,7 +364,7 @@ if __name__=="__main__":
     # even later into the signal
     chunk_size=16
     # The size of the noise added to the training data
-    noise_std=0.02
+    noise_std=0.005
     
     # Define the training and testing datasets
     train_dat=CleanData(train_dir, 
@@ -463,7 +470,7 @@ if __name__=="__main__":
     print("Total time: %.3f seconds"%(t-t0))
         
     # Save the model dictionary.
-    torch.save(model.state_dict(), "lstm_mu.pth")
+    torch.save(model.state_dict(), "lstm_mu_1-5x_sampling.pth")
 
     # Plot the training and testing losses thorughout
     # the epochs.

@@ -18,6 +18,7 @@ import matplotlib.pyplot as plt
 import torch
 import scipy.stats as stats
 from scipy.interpolate import LSQUnivariateSpline
+from scipy.interpolate import interp1d
 
 from LSTM_on_mu import LSTMModel
 
@@ -100,7 +101,8 @@ class Mu_Transform():
         #from zero to one.
         
         if not freeze_params:
-            t=ecrop[len(ecrop)//5::len(ecrop)//5] # Make four knot locations
+            de=len(ecrop)//5
+            t=ecrop[de-1:-de:de] # Make four knot locations
                 # evenly spaced in the indeces. Knot density mimics energy 
                 # sampling rate.
             spl_func=LSQUnivariateSpline(ecrop, muT, t, k=3) # Fit a spline
@@ -770,24 +772,17 @@ def add_mcglitch(y,
 
 
 
-if __name__=="__main__":
+if __name__=="__main__":  
     
-  
+    # This first bunch of code is just loading/creating an example on which to 
+    # deglitch
 
     # Load an example mu and e
     # Just an example I have on file
     MU=np.load("pixel_mus.npy", allow_pickle=True)
     E=np.load("pixel_es.npy", allow_pickle=True)
-    #NPIX=32
-    #start=np.random.choice(range(64))
-    #start=58
-    #print("Start: %d"%start)
-    #es=E[start*NPIX:(start+1)*NPIX]
-    #mus=np.stack(MU[start*NPIX:(start+1)*NPIX])
-    #good_pix_inds=find_good_pix(mus)
-    #mu=np.sum(mus[good_pix_inds], axis=0)
-    #e=np.sum(es[good_pix_inds], axis=0)/len(good_pix_inds)
     
+    # Make sure it isn't 0 or nan
     ind=np.random.randint(0,len(MU))
     mu=MU[ind]
     e=E[ind]
@@ -796,6 +791,7 @@ if __name__=="__main__":
         mu=MU[ind]
         e=E[ind]
 
+    # This code pulls an example mu from the FEFF data I'm using
     #mu_dir="mu_test"
     #mulist=os.listdir(mu_dir)
     #muname=np.random.choice(mulist)
@@ -803,15 +799,15 @@ if __name__=="__main__":
     #e=np.arange(len(mu))
 
     clean=np.copy(mu)
+    # Option to upsample the example for testing
     #clean=torch.from_numpy(mu)
     #e=torch.from_numpy(e)
-    #m = nn.Upsample(size=int(1*len(clean)), mode='linear')
+    #m = nn.Upsample(size=int(2*len(clean)), mode='linear')
     #clean=m(clean.view(1,1,-1)).squeeze().numpy()
     #e=m(e.view(1,1,-1).float()).squeeze().numpy()
-    #glitchy=clean+np.random.normal(0,(max(clean)-min(clean))/200, len(clean))
+    #glitchy=clean+np.random.normal(0,0.005, len(clean))
     glitchy=clean.copy()
-    
-    #glitchy=np.copy(mu)
+
          
     # Add glitches if desired
     add_glitches=False
@@ -833,6 +829,7 @@ if __name__=="__main__":
                                             skip_num_points=chunk_size,
                                             return_inds=True)
     
+        # Option to add a mock monochromator glitch.
 #        glitchy, mc_glitch_ind = add_mcglitch(glitchy,
 #                                              mcglitch,
 #                                              min_size=max(glitchy)/12,
@@ -841,6 +838,7 @@ if __name__=="__main__":
 #                                              return_inds=True)
     
     
+    # Plot the original mu being used
     plt.figure(1, figsize=(5,4))
     plt.xlabel("X-ray energy (eV)")
     plt.ylabel("Absorption coefficient (normalized)")
@@ -850,25 +848,27 @@ if __name__=="__main__":
 
 #==============================================================================
     # Here's the syntax for the use of the deglitcher
-    
+    # With e and glitchy defined:
     crop_ind=75
     # To define the cropping point with a particular energy
     #e0=9000 # eV
     #crop_ind=sum(e<e0)
     Deglitcher=Mu_Deglitcher()    
-    t0=time.time()
+    t0=time.time() # Optional to keep track of how long it takes
     deglitched_mu = Deglitcher.run_twostage(e,
                                             glitchy, 
                                             crop_ind=crop_ind, 
-                                            sig_val=0.01, 
+                                            sig_val=0.015, 
                                             visualize=True)
     t1=time.time()
 #==============================================================================    
     
-    
+    # Plot the deglitched mu and the spline that was used for the transformation
     plt.figure(1)
     plt.plot(e, deglitched_mu, label='Deglitched')
-    plt.plot(e[crop_ind:], Deglitcher.transform.spl*Deglitcher.transform.scale+Deglitcher.transform.offset, label="Spline")
+    plt.plot(e[crop_ind:], \
+             Deglitcher.transform.spl*Deglitcher.transform.scale+\
+             Deglitcher.transform.offset, label="Spline")
     plt.legend()
     plt.tight_layout()
     #plt.savefig("Deglitching example.png", dpi=400)
