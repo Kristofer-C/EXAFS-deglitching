@@ -8,6 +8,8 @@ Further functions are defined to help create an artificial example  of a glitchy
 signal.
 
 The main script runs an example of deglitching and prints and plots the results.
+Several chunks of code in main() are commented out. These provide different
+examples of mu and e.
 """
 
 
@@ -16,11 +18,13 @@ import time
 import numpy as np
 import matplotlib.pyplot as plt
 import torch
+from torch import nn
 import scipy.stats as stats
 from scipy.interpolate import LSQUnivariateSpline
 from scipy.interpolate import interp1d
 
 from LSTM_on_mu import LSTMModel
+from discriminate_pixels import *
 
 
 
@@ -28,6 +32,7 @@ class Mu_Transform():
     """
     Performs forward and reverse transformations on mu to make
     it amenable to next point predictions with the LSTM.
+    
     
     __init__() defines the local variables with null values
     
@@ -102,16 +107,25 @@ class Mu_Transform():
         
         if not freeze_params:
             de=len(ecrop)//5
-            t=ecrop[de-1:-de:de] # Make four knot locations
+            t=ecrop[de:-de:de] # Make four knot locations
                 # evenly spaced in the indeces. Knot density mimics energy 
                 # sampling rate.
-            spl_func=LSQUnivariateSpline(ecrop, muT, t, k=3) # Fit a spline
+                
+            #t=np.linspace(min(ecrop)+(max(ecrop)-min(ecrop))/10, max(ecrop)-(max(ecrop)-min(ecrop))/10, 5)
+                
+            spl_func=LSQUnivariateSpline(ecrop, muT, t, k=3)#, w=np.exp(np.linspace(0,2,len(e_spl))))
+            # Fit a spline
                 # using the knot locations and cropped indeces
             
             self.spl=spl_func(ecrop) # Update self.spl if freeze_params is false
 
         # Subtract the spline to center the oscillations of mu to zero
         muT-=self.spl
+        
+        if not freeze_params:
+            self.scale2=max(muT)-min(muT)
+            
+        #muT/=self.scale2
         
         # Return the cropped energy values and the transformed mu.        
         return ecrop, muT
@@ -138,6 +152,7 @@ class Mu_Transform():
         """
         
         # Add the spline and scale and shift it back
+        #muT*=self.scale2
         muT=(muT + self.spl)*self.scale+self.offset
         
         # Stitch the part of mu that was cropped out with the reverse
@@ -164,13 +179,20 @@ class Mu_Deglitcher():
     out_size (int): The number of floats outputted by the model. Default
     is 1. For the current model, out_size must be 1.
     
-    model (pytorch module): The LSTM model used for predicting the next
-    point in the sequence.
+    model_low_sampling (pytorch module): The LSTM model used for predicting the
+    next point in a sequence of relatively low sampled data.
+    
+    model_high_sampling (pytorch module): The LSTM model used for predicting the
+    next point in a sequence of relatively high sampled data.
     
     transform (class): The class used to transform mu for deglitching and back 
     again. Default is Mu_transform(). It must contain .forward() and .reverse()
     which return the respective transformations. .forward() must have the 
     keyword boolean argument 'freeze_params' and the keyword argument crop_ind.
+    
+    points_removed (int, list): A list of indeces of data points that were
+    removed if the difference in energy between it and the next point is too
+    small.
     
     
     Functions:
@@ -179,18 +201,21 @@ class Mu_Deglitcher():
     
     deglitch: Removes sharp points and sudden steps from an array.
     
+    deglitch_desampling: Deglitches the spectrum in two parts according to the
+    different sampling rates present in the spectrum.
+    
     run: Performs the transformations and deglitching.
     
-    run_twostages: Performs the transformations and deglitching
-    with a two-stage process.
+    run_twostages: Performs the transformations and deglitching with a two-stage 
+    process.
     """
     
     def __init__(self):
         """
-        Loads the model, initializes variables, and defines the transform class.
+        Loads the models, initializes variables, and defines the transform class.
         """
         
-        # Load the model
+        # Define mutual parameters both models
         hidden_size=32        
         batch_size=1
         num_layers=2
@@ -201,7 +226,10 @@ class Mu_Deglitcher():
         self.device='cpu'
         self.chunk_size=16
         self.out_size=1
-        self.model=LSTMModel(self.chunk_size, 
+        
+        # Load and initialize the model used for making predictions on low 
+        # sampling data
+        self.model_low_sampling=LSTMModel(self.chunk_size, 
                              hidden_size, 
                              self.out_size, 
                              batch_size,
@@ -209,12 +237,28 @@ class Mu_Deglitcher():
                              drop_prob,
                              bidirectional,
                              self.device).to(self.device)
-        self.model.load_state_dict(torch.load("lstm_mu.pth",
+        self.model_low_sampling.load_state_dict(torch.load("lstm_mu_1x_sampling.pth",
                                               map_location=torch.device(self.device)))
-        self.model.init_hidden(batch_size)
+        self.model_low_sampling.init_hidden(batch_size)
+        
+        # Load and initialize the model used for high sampling data
+        self.model_high_sampling=LSTMModel(self.chunk_size, 
+                             hidden_size, 
+                             self.out_size, 
+                             batch_size,
+                             num_layers, 
+                             drop_prob,
+                             bidirectional,
+                             self.device).to(self.device)
+        self.model_high_sampling.load_state_dict(torch.load("lstm_mu_1-5x_sampling.pth",
+                                              map_location=torch.device(self.device)))
+        self.model_high_sampling.init_hidden(batch_size)
         
         # Define the transform class
         self.transform=Mu_Transform()
+        
+        # Initialize the list of removed points
+        self.points_removed=[]
         
         
 
@@ -265,12 +309,15 @@ class Mu_Deglitcher():
         
 
     def deglitch(self,
-                 e,
                  glitchy,
+                 model,
                  sig_val=0.025, 
-                 return_all=False):
+                 return_all=False,
+                 start_ind=0,
+                 end_ind=None):
         """
-        Takes a glitchy signal, and deglitches it using the model provided. 
+        Takes a glitchy signal and deglitches a given range of it using the 
+        model provided. 
         
         A trained LSTM model is used to take sets of consecutive values from
         a signal and predict the next value in the sequence. The difference 
@@ -293,16 +340,14 @@ class Mu_Deglitcher():
         error between the most recent set of predicted values and their measured
         values.
         
-        For most sets of measured mu, the energy sampling rate has abrupt changes
-        which can trigger a false glitch detection. This algorithm also finds
-        these sharp changes and does not allow for glitch detection within
-        half the chunk_size number of points after the change.
-        
         
         Parameters:
             
         glitchy (array, float): The set of values (the signal) that is to be 
         deglitched.
+        
+        model (function): Takes in a chunk of an array and outputs a single 
+        value.
         
         sig_val (float, default=0.025): The significance value with which 
         Grubb's test is conducted. See Grubbs_test() for details.
@@ -311,13 +356,24 @@ class Mu_Deglitcher():
         If true, deglitched, predictions, point_glitches, and step_glitches are
         returned.
         
+        start_ind (int, default=0): The index at which to begin deglitching. 
+        Predictions must still be made for earlier points, but the function
+        will not make glitch fix changes.
+        
+        end_ind (int, default=None): The index at which to stop deglitching.
+        The point before end_ind is actually the last point that can be
+        deglitched. Predictions after end_ind are filled out with the values
+        of the rest of the deglitched array.
+        
         
         Returns:
             
-        deglitched (float, array): The deglitched signal.
+        deglitched (float, array): The deglitched signal. Always the same length
+        as the original signal regardless of the range given by start_ind and
+        end_ind.
         
         predictions (float, list): The list of predictions made by the model 
-        during deglitching.
+        during deglitching. Also the same length as the original signal.
         
         point_glitches (int, list): The list of indeces determined to contain 
         point glitches.
@@ -326,52 +382,39 @@ class Mu_Deglitcher():
         step glitches.
         """
         
-        
-        # The sharp changes in sampling rate can cause false positives in the
-        # glitch detection, so these lines find the sharp changes
-        # and the deglitching algorithm is hard coded to not detect glitches
-        # for a few points after the sharp changes.
-        facts=np.exp(np.abs(np.log((e[2:]-e[1:-1])/(e[1:-1]-e[:-2])))) # Factors
-            # by which consecutive sampling rates change. The absolute value of
-            # the ratios are taken in log space to enforce that the ratio is 
-            # greater than 1. 
-        bad_inds=np.where(facts>2)[0] # The indeces at which the sampling rate
-            # changes by more than a factor of two.
-            
         deglitched=glitchy.copy()
-        num_points=len(glitchy)
+        # If no end_ind is provided, then it is None and we can set it to the 
+        # last available index of the array.
+        if not end_ind:
+            end_ind=len(deglitched)-1
+            
         # Reset the hidden and cell states of the LSTM cell
-        self.model.init_hidden(1)
+        model.init_hidden(1)
         
         # Initialize lists to track the locations of the glitches
         point_glitches=[]
         step_glitches=[]
         predictions=[]
         
-        # Create some first predictions without allowing it to report a glitch
-        #for ind in range(chunk_size, 2*chunk_size):
-        #    
-        #    chunk=torch.Tensor([deglitched[ind-chunk_size:ind]])
-        #    prediction=model(chunk).item()
-        #    predictions.append(prediction)
-        
+
         # FOR GRUBB'S TEST
         # Grubb's test requires a short history of residuals. We obviously can't
         # make predictions before the chunk_size+1th point, so the predictions 
         # are initialized by adding noise to the actual signal
         predictions=list(deglitched[:self.chunk_size]+\
-                         np.random.normal(0, 0.02, self.chunk_size))
+                         np.random.normal(0, 0.01, self.chunk_size))
                 
         
         # ind is the index of the value of the signal to be predicted
         # Cycle over every point after ind=chunk_size to look for and fix glitches
         # Don't make a prediction for the last point, becasue a possible step
         # glitch requires there to be another point for comparison
-        for ind in range(self.chunk_size, num_points-self.out_size):
+        for ind in range(self.chunk_size, end_ind+1-self.out_size):
             
-            # chunk: the current chunk_size values from the signal that are used
-            # to make a prediction
-            chunk=torch.Tensor(deglitched[ind-self.chunk_size:ind]).float().detach()
+            # ychunk: the most recent chunk_size values from the signal that are
+            # used to make a prediction
+            ychunk=torch.Tensor(deglitched[ind-self.chunk_size:ind]).float().detach()
+                       
             # val: the value of the signal immediately after the last value in chunk
             val=deglitched[ind]
             
@@ -383,21 +426,16 @@ class Mu_Deglitcher():
             #else:
             #    threshold=max(0.1,5*np.sqrt(np.mean((predictions[-chunk_size:]-chunk.squeeze().numpy())**2)))
             
-            # prediction: the value after of the signal chunk predicted by the model
-            prediction=self.model(chunk.view(1,1,-1).to(self.device)).squeeze().item()
+            # prediction: the value after the signal chunk predicted by the model
+            prediction=model(ychunk.view(1,1,-1).to(self.device))\
+                                                        .squeeze().item()
             predictions.append(prediction)
             
-            # A prediction still needed to be made for the next point, but now
-            # move on to the next index if a sharp change in the sampling rate
-            # is too recent.
-            if ((ind-bad_inds<chunk_size//2) & (ind>=bad_inds)).any():
-                continue
-            
-            
             # GRUBB'S TEST METHOD
-            # r: the residuals from between last chunk_size predictions and the 
+            # r: the residuals from between last chunk_size+1 predictions and the 
             # given signal
-            r=np.array(predictions[-(self.chunk_size+1):])-np.append(chunk.squeeze().numpy(), val)
+            r=np.array(predictions[-(self.chunk_size+1):])-\
+                                      np.append(ychunk.squeeze().numpy(), val)
             # If there is an outlier, then Grubbs returns the index in the chunk
             # If deglitching has been working properly, then there should only ever
             # be a glitch in the last spot
@@ -411,43 +449,48 @@ class Mu_Deglitcher():
             
             # GRUBBS TEST METHOD
             # If the Grubb's test identified the previous value as an outlier
-            # from the chunk_size values before that, then it is a glitch
-            if chunk_glitch_ind==self.chunk_size:
+            # from the chunk_size values before that, then it is a glitch.
+            # Only attempt to identify and fix glitches if ind is at least
+            # at start_ind.
+            if chunk_glitch_ind==self.chunk_size and ind>=start_ind:
                 
                 # Try replacing the problem point with the predicted value
                 next_ind=ind+1
                 deglitched[ind]=prediction
     
                 # Make a prediction for the next point 
-                chunk2=torch.Tensor(deglitched[next_ind-self.chunk_size:next_ind]).float().detach()
-                prediction2=self.model(chunk2.view(1,1,-1).to(self.device)).squeeze().item()
+                ychunk2=torch.Tensor(\
+                    deglitched[next_ind-self.chunk_size:next_ind]\
+                    ).float().detach()
+                
+                prediction2=model(\
+                                  ychunk.view(1,1,-1).to(self.device)\
+                                  ).squeeze().item()
+                
                 val2=deglitched[next_ind]
                 
-                r=(np.append(predictions[-self.chunk_size:], prediction2)
-                -np.append(chunk2.squeeze().numpy(), val2))
+                r=np.append(predictions[-self.chunk_size:], prediction2)\
+                                -np.append(ychunk2.squeeze().numpy(), val2)
                 
-                chunk_glitch_ind=self.Grubbs_test(r, sig_val/8)
+                # False step glitches are very disruptive, so the sig_val
+                # for step glitch identification is lowered. 
+                chunk_glitch_ind=self.Grubbs_test(r, sig_val/10)
                 
                 # THRESHOLD METHOD
                 # If the next point is still far from the prediction
                 # It is probably a step glitch
                 #if abs(prediction2-val2)>threshold:
                 
-                
                 # GRUBB'S TEST METHOD
                 if chunk_glitch_ind==self.chunk_size:
+                    # If the next point was identified as an outlier as well,
+                    # then the first point was a step glitch.
                 
                     # Subtract the inital step from the rest of the spectrum
-                    # Another method was tried and commented out
-
                     deglitched[ind]=val
-                    #print(deglitched[ind])
-                    #print(prediction2, val2)
-                    #step=(prediction+prediction2-val-val2)/2
                     step=prediction-val
-                    #print(step)
                     deglitched[ind:]+=step                    
-                    #deglitched[next_ind:]+=(prediction-val)
+                    
                     # Record the index of the glitch
                     step_glitches.append(ind)
                 
@@ -457,6 +500,15 @@ class Mu_Deglitcher():
                     # Record the index of the glitch
                     point_glitches.append(ind)
                     
+        # Make one last prediction so that the prediction list is the same 
+        # length as the start_ind to end-ind interval
+        ychunk=torch.Tensor(deglitched[-self.chunk_size-1:-1]).float().detach()
+        prediction=model(ychunk.view(1,1,-1).to(self.device)).squeeze().item()
+        predictions.append(prediction)
+        
+        # Fill in the rest of the predictions list with the deglitched values.
+        predictions.extend(deglitched[end_ind+1:])
+                
                     
         if return_all:
             return deglitched, predictions, point_glitches, step_glitches
@@ -464,6 +516,141 @@ class Mu_Deglitcher():
             return deglitched
         
         
+        
+    def deglitch_desampling(self,
+                            e,
+                            glitchy,
+                            sig_val=0.025,
+                            return_all=False):
+        """
+        Deglitches an array in two parts to better account for a sharp decrease
+        in energy sampling rates.
+        
+        First, the point at which the sampling rate decreases by more than a 
+        factor of two is found. Glitches are found and fixed in the high 
+        sampling part of the signal with a model trained to find glitches in
+        data with that sampling, then the deglitched signal is desampled by a
+        factor of 2 in the high sampling region and the desampled signal is 
+        deglitched with a model trained for that sampling rate. The two 
+        deglitched regions are stitched together and returned as the deglitched
+        array. 
+        
+        If no sharp change in sampling rate is detected, then the signal is
+        deglitched normally with the deglitch function and the model trained
+        for low sampled data.
+        
+        Note, the desampled region is only used to inform the model of the
+        behaviour of that region and no glitches are found or fixed there. 
+        
+        Also, this function has nearly identical functionality as deglitch(). 
+        Both return the deglitched signal and optionally the predictions made
+        and the indeces of the glitches found. The differences are that 
+        deglitch_desampling() requires the energy array as an argument and does
+        not take in a range of indeces for deglitching.
+        
+        
+        Parameters:
+            
+            e (array, float): The array of energy values.
+            
+            glitchy (array, float): The array to be deglitched. Must be the same
+            size as e.
+            
+            sig_val (float, default=0.025): The significance value for outlier
+            identification.
+            
+            return_all(bool, default=False): If true, returns the list of 
+            predictions and indeces of point and step glitches as well.
+            
+            
+            
+        Returns:
+            
+            deglitched (float, array): The deglitched signal. 
+        
+            predictions (float, list): The list of predictions made by the model 
+            during deglitching. Always the same length as the original signal.
+        
+            point_glitches (int, list): The list of indeces determined to contain 
+            point glitches.
+        
+            step_glitches (int, list): The list of indeces determined to contain 
+            step glitches.
+        """
+        
+
+        facts=np.exp(np.abs(np.log((e[2:]-e[1:-1])/(e[1:-1]-e[:-2])))) # Factors
+            # by which consecutive sampling rates change. The absolute value of
+            # the ratios are taken in log space to enforce that the ratio is 
+            # greater than 1. 
+        bad_inds=np.where(facts>2)[0] # The indeces before which the sampling rate
+            # changes by more than a factor of two. bad_inds+1 is the index of 
+            # the point in between the two sampling rates.
+        
+        # Only deglitch in two parts if there is a sharp change in sampling rate.
+        if len(bad_inds)>0:
+             
+            # Deglitch the spectrum with the high sampling rate-trained model.
+            # Only the first part of the spectrum needs to be searched for 
+            # glitches at this point, but changes to the spectrum by step glitch
+            # fixes need to be carried forward into the next steps.
+            (deglitched1,
+             predictions1,
+             pg_inds1,
+             sg_inds1)=self.deglitch(glitchy, 
+                             self.model_high_sampling, 
+                             sig_val, 
+                             True,
+                             0,
+                             bad_inds[0]+1)
+            
+            # Modify the deglitched mu by desampling the beginning to better 
+            # match the sampling rate of the rest of the spectrum
+            glitchy_dsmpl=np.concatenate((deglitched1[bad_inds[0]-1::-2][::-1],\
+                                          deglitched1[bad_inds[0]+1:]))
+            
+            # Deglitch the entire spectrum with more uniform sampling
+            (deglitched_dsmpl, 
+             predictions_dsmpl,
+             pg_inds2,
+             sg_inds2) = self.deglitch(glitchy_dsmpl,
+                             self.model_low_sampling, 
+                             sig_val, 
+                             True,
+                             len(glitchy_dsmpl)-len(glitchy)+bad_inds[0]+1)
+            
+            # Stitch the two deglitched spectra together at the point where 
+            # the sampling rate changes.
+            deglitched=np.concatenate((deglitched1[:bad_inds[0]+1], \
+                            deglitched_dsmpl[-(len(glitchy)-bad_inds[0]-1):]))
+        
+            # Stitch the lists of predictions and indeces of glitches together 
+            # similarly
+            predictions=np.concatenate((predictions1[:bad_inds[0]+1], \
+                            predictions_dsmpl[-(len(glitchy)-bad_inds[0]-1):]))
+            
+            pg_inds=np.concatenate([np.array(pg_inds1),\
+            np.array(pg_inds2)+len(glitchy)-len(glitchy_dsmpl)]).astype('int')
+    
+            sg_inds=np.concatenate([np.array(sg_inds1), \
+            np.array(sg_inds2)+len(glitchy)-len(glitchy_dsmpl)]).astype('int')
+           
+            
+        # If there is no sharp change in sampling rate, deglitch normally.
+        else:
+            (deglitched, 
+             predictions, 
+             pg_inds, 
+             sg_inds) = self.deglitch(glitchy, 
+                                        self.model_low_sampling, 
+                                        sig_val, 
+                                        True)
+        
+        if return_all:
+            return deglitched, predictions, pg_inds, sg_inds
+        else:
+            return deglitched
+    
     
     
     def run(self, e, glitchy_mu, crop_ind=0, sig_val=0.025, visualize=False):
@@ -498,40 +685,49 @@ class Mu_Deglitcher():
         
         Returns:
             
+        e_deglitched (array, float): The array of energy values. Identical to
+        the one provided as an argument, but with the points removed with 
+        very small energy differences.
+            
         deglitched_mu (array, float): The array of deglitched absorption 
         coefficient values. 
         """
         
-        # Make sure the energy step is always positive.
-        diffTest = np.diff(e) <= 0
+        # Remove and record points with almost zero energy difference       
+        diffTest = np.diff(e) <= 0.1
         if any(diffTest):
-            e[np.where(diffTest)] -= 1e-1
+            self.points_removed=np.where(diffTest)[0]
+            e_deglitched=np.delete(e, self.points_removed)
+            glitchy_mu=np.delete(glitchy_mu, self.points_removed)
+        else: 
+            e_deglitched=e.copy()        
         
-        
-        ecrop, muT=self.transform.forward(e, glitchy_mu, crop_ind)
+        # Crop and transform the energy and mu arrays.
+        ecrop, muT=self.transform.forward(e_deglitched, glitchy_mu, crop_ind)
         
         if visualize:            
-            # The guessed glitchy points are the indices of k, not e.
+            # The guessed glitchy points are the indices of ecrop, not e.
             (deglitched_muT,
             predictions,
             point_glitches,
-            step_glitches)=self.deglitch(ecrop, muT, sig_val, visualize)
+            step_glitches)=self.deglitch_desampling(ecrop, muT, sig_val, visualize)
             
             # Some visualization
             plt.figure(3)
             plt.plot(ecrop, muT, label='Original')
             plt.plot(ecrop, deglitched_muT, label='Deglitched')
-            plt.scatter(ecrop[:-self.out_size], predictions, s=8, color='r', label='Predictions')
+            plt.scatter(ecrop, predictions, s=8, color='r', label='Predictions')
             plt.legend()
             print("Possible point glitches at: ", ecrop[point_glitches])
             print("Possible step glitches at: ", ecrop[step_glitches])       
             
         else:
-            deglitched_muT=self.deglitch(ecrop, muT, sig_val, visualize)
+            deglitched_muT =self.deglitch_desampling(ecrop, muT, sig_val, visualize)
             
+        # Transform the signal back. 
         deglitched_mu=self.transform.reverse(glitchy_mu, deglitched_muT)
             
-        return deglitched_mu
+        return e_deglitched, deglitched_mu
         
         
     
@@ -542,15 +738,15 @@ class Mu_Deglitcher():
         
         Large glitches may result in non-ideal spline subtraction during the
         transformation of mu and therefore deglitched points will not be ideal.
-        So a two-stage process is implemented to eliminate the effect of large 
+        A two-stage process is implemented to eliminate the effect of large 
         glithes on spline fitting.
        
         First, the given mu values are transformed, then glitches are identified
         and crudley deglitched in the original space. The crudely deglitched mu 
         is then transformed again. Using the spline subtraction from this latest
-        transformation, the original mu is transformed again, but without the 
+        transformation, the original mu is transformed again without the 
         effects of the large glitches. This latest transformed mu is deglitched 
-        as normal, and transformed back.
+        as normal, transformed back, and returned.
         
         
         Paramters:
@@ -578,19 +774,23 @@ class Mu_Deglitcher():
         coefficient values. 
         """
 
-        # Make sure the energy step is always positive.        
-        diffTest = np.diff(e) <= 0
+        # Remove points with almost zero energy difference       
+        diffTest = np.diff(e) <= 0.1
         if any(diffTest):
-            e[np.where(diffTest)] -= 1e-1
+            self.points_removed=np.where(diffTest)[0]
+            e_deglitched=np.delete(e, self.points_removed)
+            glitchy_mu=np.delete(glitchy_mu, self.points_removed)
+        else: 
+            e_deglitched=e.copy()
         
         # Get the first transformation
-        ecrop, muT1 = self.transform.forward(e, glitchy_mu, crop_ind)
+        ecrop, muT1 = self.transform.forward(e_deglitched, glitchy_mu, crop_ind)
         
         # Find the glitches as normal
         (deglitched_muT1,
          predictions,
          point_glitches,
-         step_glitches)=self.deglitch(ecrop, muT1, sig_val, return_all=True)
+         step_glitches)=self.deglitch_desampling(ecrop, muT1, sig_val, return_all=True)
         
         # Do a rough deglitch at the potential problem points
         mu2=np.copy(glitchy_mu)
@@ -600,51 +800,61 @@ class Mu_Deglitcher():
                 # in mu
             mu2[ind]=(mu2[ind-1]+mu2[ind+1])/2 # Replace point glitches with 
                 # average of the neighbouring points
+                # There should never be an index error here because the deglitch
+                # algorithm can't predict a glitch at the very end or very
+                # beginning
         for ind in step_glitches:
             ind+=crop_ind
             mu2[ind:]-=mu2[ind]-mu2[ind-1] # Shift step glitches by the differnce
-                # between the last point and this one.
+                # between the last point and this one. This results in two 
+                # consecutive points with the same value where there used to be
+                # a step glitch.
             
         # Visualization
         if visualize:
             plt.figure(3)
-            plt.plot(e, glitchy_mu, label="Original")
-            plt.plot(e, mu2, label="Roughly deglitched") 
+            plt.plot(e_deglitched, glitchy_mu, label="Original")
+            plt.plot(e_deglitched, mu2, label="Roughly deglitched") 
             plt.legend()
         
-        # Transform again using the roughly deglitched mu
-        ecrop, muT2 = self.transform.forward(e, mu2, crop_ind)
+        # Transform again using the roughly deglitched mu to get a better spline.
+        ecrop, muT2 = self.transform.forward(e_deglitched, mu2, crop_ind)
         
         # Transform the original mu using the spline, etc. from the previous
         # transformation
-        ecrop, muT3 = self.transform.forward(e, glitchy_mu, crop_ind, freeze_params=True)
+        ecrop, muT3 = self.transform.forward(e_deglitched,
+                                             glitchy_mu, 
+                                             crop_ind, 
+                                             freeze_params=True)
         
         # Deglitch as normal
         if visualize:
             (deglitched_muT,
             predictions,
             point_glitches,
-            step_glitches)=self.deglitch(ecrop, muT3, sig_val, visualize)
+            step_glitches)=self.deglitch_desampling(ecrop, muT3, sig_val, visualize)
             
             plt.figure(4)
             plt.plot(ecrop, muT3, label='Transformed mu')
             plt.plot(ecrop, deglitched_muT, label='Deglitched transformed mu')
-            plt.scatter(ecrop[:-self.out_size], predictions, s=8, color='r', label='Predictions')
+            plt.scatter(ecrop, predictions, s=8, color='r', label='Predictions')
+            #plt.scatter(ecrop[1:], deglitched_muT[:-1], s=8, color='k', label='Last points')
             plt.legend()
             print("Possible point glitches at: ", ecrop[point_glitches])
             print("Possible step glitches at: ", ecrop[step_glitches])
             
         else:
-            deglitched_muT=self.deglitch(ecrop, muT3, sig_val, visualize)
+            deglitched_muT=self.deglitch_desampling(ecrop, muT3, sig_val/2, visualize)
         
         # Transform back to original space
         deglitched_mu=self.transform.reverse(glitchy_mu, deglitched_muT)
         
-        return deglitched_mu
+        return e_deglitched, deglitched_mu
         
 
 
-# Functions for this script, not really useful for anything else:
+# Functions for adding glitches to simulate glitchy data. Only useful for 
+        # demonstrative examples in this script.
 def add_point_glitch_clean_start(y, 
                                  num_glitches_range=2,
                                  min_size=0.2,
@@ -779,18 +989,40 @@ if __name__=="__main__":
 
     # Load an example mu and e
     # Just an example I have on file
-    MU=np.load("pixel_mus.npy", allow_pickle=True)
-    E=np.load("pixel_es.npy", allow_pickle=True)
+    MU=np.load("pixel_mus_markers.npy", allow_pickle=True)
+    E=np.load("pixel_es_markers.npy", allow_pickle=True)
     
+    # Pick one from the list.
     # Make sure it isn't 0 or nan
-    ind=np.random.randint(0,len(MU))
-    mu=MU[ind]
-    e=E[ind]
-    while mu[0]!=mu[0] or max(mu)==0:
-        ind=np.random.randint(0,len(MU))
-        mu=MU[ind]
-        e=E[ind]
-
+    #ind=np.random.randint(0,len(MU))
+    #ind=300
+    #mu=MU[ind]
+    #e=E[ind]
+    #while mu[0]!=mu[0] or max(mu)==0:
+    #    ind=np.random.randint(0,len(MU))
+    #    mu=MU[ind]
+    #    e=E[ind]
+    
+    # Pick a set of 32 pixel measurements from a fluorescence scan, do the 
+    # discrimination and sum them up.
+    NPIX=32
+    #start=np.random.choice(range(22))
+    start=8
+    print("Start: %d"%start)
+    es=E[start*NPIX:(start+1)*NPIX]
+    mus=np.stack(MU[start*NPIX:(start+1)*NPIX])
+    good_pix_inds=find_good_pix(mus)
+    mu=np.sum(mus[good_pix_inds], axis=0)
+    e=es[good_pix_inds[0]]
+    
+    # An example with a step glitch at the point where sampling rates change.
+    #dat=np.genfromtxt("C:\\Users\\Me!\\Documents\\CLS 2021\\Machine learning\
+    #\\With FEFF data\\Detector channels data\
+    #\\Ag K  EXAFS at M1pitch 012 bend 77 blade 1p5_1.txt")
+    #dat=np.transpose(dat)
+    #e=dat[0]
+    #mu=dat[1]/dat[3]
+    
     # This code pulls an example mu from the FEFF data I'm using
     #mu_dir="mu_test"
     #mulist=os.listdir(mu_dir)
@@ -802,12 +1034,13 @@ if __name__=="__main__":
     # Option to upsample the example for testing
     #clean=torch.from_numpy(mu)
     #e=torch.from_numpy(e)
-    #m = nn.Upsample(size=int(2*len(clean)), mode='linear')
+    #m = nn.Upsample(size=int(1*len(clean)), mode='linear')
     #clean=m(clean.view(1,1,-1)).squeeze().numpy()
     #e=m(e.view(1,1,-1).float()).squeeze().numpy()
+    
+    # Either add noise or just copy directly.
     #glitchy=clean+np.random.normal(0,0.005, len(clean))
     glitchy=clean.copy()
-
          
     # Add glitches if desired
     add_glitches=False
@@ -842,20 +1075,20 @@ if __name__=="__main__":
     plt.figure(1, figsize=(5,4))
     plt.xlabel("X-ray energy (eV)")
     plt.ylabel("Absorption coefficient (normalized)")
-    plt.plot(e, glitchy, label='Measured')
+    plt.plot(e, glitchy, label='Measured', marker='.')
     #plt.plot(e,glitchy, label='With added glitches')
     
 
 #==============================================================================
     # Here's the syntax for the use of the deglitcher
     # With e and glitchy defined:
-    crop_ind=75
-    # To define the cropping point with a particular energy
+    crop_ind=105
+    # To define the cropping point with a particular energy:
     #e0=9000 # eV
     #crop_ind=sum(e<e0)
     Deglitcher=Mu_Deglitcher()    
-    t0=time.time() # Optional to keep track of how long it takes
-    deglitched_mu = Deglitcher.run_twostage(e,
+    t0=time.time() # Optional to keep track of how long deglitching takes
+    e_deglitched, deglitched_mu = Deglitcher.run_twostage(e,
                                             glitchy, 
                                             crop_ind=crop_ind, 
                                             sig_val=0.015, 
@@ -863,10 +1096,13 @@ if __name__=="__main__":
     t1=time.time()
 #==============================================================================    
     
-    # Plot the deglitched mu and the spline that was used for the transformation
+    # Print the indeces of the removed points
+    print("Indeces of points removed: ", Deglitcher.points_removed)
+
+     # Plot the deglitched mu and the spline that was used for the transformation
     plt.figure(1)
-    plt.plot(e, deglitched_mu, label='Deglitched')
-    plt.plot(e[crop_ind:], \
+    plt.plot(e_deglitched, deglitched_mu, label='Deglitched', marker='.')
+    plt.plot(e_deglitched[crop_ind:], \
              Deglitcher.transform.spl*Deglitcher.transform.scale+\
              Deglitcher.transform.offset, label="Spline")
     plt.legend()
