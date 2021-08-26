@@ -20,9 +20,13 @@ Define an object with the `Mu_Deglitcher()` class. Use one of `.run()` or `.run_
 
 Imports LSTMModel from LSTM_on_mu. This is the class that defines the model used for making predictions. When loading the model, deglitch_mu.py uses the file lstm_mu.pth to load all the trained weights and biases. The hyperparamters for the model are defined in the Mu_Deglitcher class and can not be changed for the model to load. 
 
+For an example where the clustering discrimination is conducted to provide mu and e, the script imports the functions from `discriminate_pixels.py`.
+
 ### Notes
 
 - It is recommended to use `.run_twostage()` because it more robustly detects and fixes glitches, particularly when large step glitches are present.
+
+- Both `*.run()` and `*.run_twostage()` will check for energy points that are nearly on top of each other and remove one if they exist. This ensures that such point won't interfere when figuring out how to desample 
 
 - `sig_val` is the main tuning parameter. It is essentially a measure of the sensitivity of the algorithm. A higher value of `sig_val` will result in more glitch detections, and a lower value of `sig_val` will result in fewer glitch detections. With clean data, a good next-point predictor, and glitches that show true and sudden statistically significant deviations from the trend, there should exist a range of values of `sig_val` for which only the glitches are identified. I have found `sig_val=0.01` is a conservative value to begin with, and it can be increased for more aggessive glitch detection. Higher than `sig_val=0.025` and the algorithm will likely report false positives.
 
