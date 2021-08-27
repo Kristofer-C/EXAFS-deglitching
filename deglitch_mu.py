@@ -257,8 +257,12 @@ class Mu_Deglitcher():
         # Define the transform class
         self.transform=Mu_Transform()
         
-        # Initialize the list of removed points
+        # Initialize the list of removed indices
         self.points_removed=[]
+        
+        # Initialize list of deglitched indices
+        self.point_glitch_inds=[]
+        self.step_glitch_inds=[]
         
         
 
@@ -579,12 +583,10 @@ class Mu_Deglitcher():
         """
         
 
-        facts=np.exp(np.abs(np.log((e[2:]-e[1:-1])/(e[1:-1]-e[:-2])))) # Factors
-            # by which consecutive sampling rates change. The absolute value of
-            # the ratios are taken in log space to enforce that the ratio is 
-            # greater than 1. 
-        bad_inds=np.where(facts>2)[0] # The indeces before which the sampling rate
-            # changes by more than a factor of two. bad_inds+1 is the index of 
+        facts=(e[2:]-e[1:-1])/(e[1:-1]-e[:-2]) # Factors
+            # by which consecutive sampling rates change. 
+        bad_inds=np.where(facts<0.5)[0] # The indeces before which the sampling rate
+            # decreases by more than a factor of two. bad_inds+1 is the index of 
             # the point in between the two sampling rates.
         
         # Only deglitch in two parts if there is a sharp change in sampling rate.
@@ -705,12 +707,18 @@ class Mu_Deglitcher():
         # Crop and transform the energy and mu arrays.
         ecrop, muT=self.transform.forward(e_deglitched, glitchy_mu, crop_ind)
         
+        # The guessed glitchy points are the indices of ecrop, not e.
+        (deglitched_muT,
+         predictions,
+         self.point_glitch_inds,
+         self.step_glitch_inds)=self.deglitch_desampling(ecrop, muT, sig_val, visualize)
+        
+        # Save the indeces of the deglitched points in e_deglitched in local 
+        # variables
+        self.point_glitch_inds = (np.array(point_glitch_inds) + crop_ind).astype('int')
+        self.step_glitch_inds = (np.array(step_glitch_inds) + crop_ind).astype('int')
+        
         if visualize:            
-            # The guessed glitchy points are the indices of ecrop, not e.
-            (deglitched_muT,
-            predictions,
-            point_glitches,
-            step_glitches)=self.deglitch_desampling(ecrop, muT, sig_val, visualize)
             
             # Some visualization
             plt.figure(3)
@@ -718,12 +726,9 @@ class Mu_Deglitcher():
             plt.plot(ecrop, deglitched_muT, label='Deglitched')
             plt.scatter(ecrop, predictions, s=8, color='r', label='Predictions')
             plt.legend()
-            print("Possible point glitches at: ", ecrop[point_glitches])
-            print("Possible step glitches at: ", ecrop[step_glitches])       
-            
-        else:
-            deglitched_muT =self.deglitch_desampling(ecrop, muT, sig_val, visualize)
-            
+            print("Possible point glitches at: ", e_deglitched[self.point_glitch_inds])
+            print("Possible step glitches at: ", e_deglitched[self.step_glitch_inds])       
+                       
         # Transform the signal back. 
         deglitched_mu=self.transform.reverse(glitchy_mu, deglitched_muT)
             
@@ -828,28 +833,100 @@ class Mu_Deglitcher():
                                              freeze_params=True)
         
         # Deglitch as normal
+        (deglitched_muT,
+         predictions,
+         point_glitch_inds,
+         step_glitch_inds)=self.deglitch_desampling(ecrop, muT3, sig_val, True)
+        
+        # Save the indeces of the deglitched points in e_deglitched in local 
+        # variables
+        self.point_glitch_inds = (np.array(point_glitch_inds) + crop_ind).astype('int')
+        self.step_glitch_inds = (np.array(step_glitch_inds) + crop_ind).astype('int')
+               
         if visualize:
-            (deglitched_muT,
-            predictions,
-            point_glitches,
-            step_glitches)=self.deglitch_desampling(ecrop, muT3, sig_val, visualize)
-            
+                    
             plt.figure(4)
             plt.plot(ecrop, muT3, label='Transformed mu')
             plt.plot(ecrop, deglitched_muT, label='Deglitched transformed mu')
             plt.scatter(ecrop, predictions, s=8, color='r', label='Predictions')
             #plt.scatter(ecrop[1:], deglitched_muT[:-1], s=8, color='k', label='Last points')
             plt.legend()
-            print("Possible point glitches at: ", ecrop[point_glitches])
-            print("Possible step glitches at: ", ecrop[step_glitches])
-            
-        else:
-            deglitched_muT=self.deglitch_desampling(ecrop, muT3, sig_val/2, visualize)
+            print("Possible point glitches at: ", e_deglitched[self.point_glitch_inds])
+            print("Possible step glitches at: ", e_deglitched[self.step_glitch_inds])
+        
         
         # Transform back to original space
         deglitched_mu=self.transform.reverse(glitchy_mu, deglitched_muT)
         
         return e_deglitched, deglitched_mu
+    
+    
+    
+    def run_w_sigval_range(self, 
+                           e,
+                           glitchy,
+                           crop_ind):
+        """
+        Deglitches through a range of significance values, and pick the list of step
+        glitch guesses and point glitch guesses that appeared the most times in
+        a row. Returns the "optimally" deglitched spectrum and the energy list 
+        with problem points removed.
+        """
+        # Establish a best_deglitched
+        best_deglitched=glitchy.copy()
+    
+        # Keep track of the number of times the current list has appeared in a row
+        count=0
+        # Keep track of the previous set of guesses
+        point_prev=[]
+        step_prev=[]
+        # The most times so far that an exact list has appeared in a row
+        max_consec=0
+        
+        # Scan through a list of values
+        for sig_val in np.logspace(-3.0, -1.5, 10):    
+            
+            # Perform the deglitching algorithm. A lot of the predicitions are 
+            # probably redundant, but depending on how it goes through and performs
+            # the deglitching, it will change further predictions
+            e_deglitched, deglitched = self.run_twostage(e, 
+                                                         glitchy,
+                                                         crop_ind,
+                                                         sig_val)
+            
+            point_glitch_guesses=self.point_glitch_inds
+            step_glitch_guesses=self.step_glitch_inds
+            
+            # If this list of guesses is the same as the last one:
+            if np.array_equal(point_glitch_guesses, point_prev) and \
+                np.array_equal(step_glitch_guesses, step_prev):
+                # Bump up the number of times we've seen it consecutively
+                count+=1
+                
+                # If it is also the most we've seen a list consecutively (or tied),
+                # record the count, the latest significance value for it, the glitch
+                # guesses, and the deglitched spectrum
+                if count>=max_consec:
+                    max_consec=count
+                    best_sigval=sig_val
+                    best_points=point_glitch_guesses
+                    best_steps=step_glitch_guesses
+                    best_deglitched=deglitched
+            # If not
+            else:
+                # reset the counter
+                count=0
+            
+            # Update the list of previous guesses
+            point_prev=point_glitch_guesses
+            step_prev=step_glitch_guesses
+            
+            # if best_deglitched was never updated, it won't have the same size
+            # as e_deglitched if e contained overlapping energy points.
+            if len(best_deglitched)!=len(e_deglitched):
+                best_deglitched=np.delete(best_deglitched, self.points_removed)
+            
+        return e_deglitched, best_deglitched
         
 
 
@@ -994,26 +1071,26 @@ if __name__=="__main__":
     
     # Pick one from the list.
     # Make sure it isn't 0 or nan
-    #ind=np.random.randint(0,len(MU))
-    #ind=300
-    #mu=MU[ind]
-    #e=E[ind]
-    #while mu[0]!=mu[0] or max(mu)==0:
-    #    ind=np.random.randint(0,len(MU))
-    #    mu=MU[ind]
-    #    e=E[ind]
+    ind=np.random.randint(0,len(MU))
+    #ind=192
+    mu=MU[ind]
+    e=E[ind]
+    while mu[0]!=mu[0] or max(mu)==0:
+        ind=np.random.randint(0,len(MU))
+        mu=MU[ind]
+        e=E[ind]
     
     # Pick a set of 32 pixel measurements from a fluorescence scan, do the 
     # discrimination and sum them up.
-    NPIX=32
+    #NPIX=32
     #start=np.random.choice(range(22))
-    start=8
-    print("Start: %d"%start)
-    es=E[start*NPIX:(start+1)*NPIX]
-    mus=np.stack(MU[start*NPIX:(start+1)*NPIX])
-    good_pix_inds=find_good_pix(mus)
-    mu=np.sum(mus[good_pix_inds], axis=0)
-    e=es[good_pix_inds[0]]
+    #start=8
+    #print("Start: %d"%start)
+    #es=E[start*NPIX:(start+1)*NPIX]
+    #mus=np.stack(MU[start*NPIX:(start+1)*NPIX])
+    #good_pix_inds=find_good_pix(mus)
+    #mu=np.sum(mus[good_pix_inds], axis=0)
+    #e=es[good_pix_inds[0]]
     
     # An example with a step glitch at the point where sampling rates change.
     #dat=np.genfromtxt("C:\\Users\\Me!\\Documents\\CLS 2021\\Machine learning\
@@ -1039,7 +1116,7 @@ if __name__=="__main__":
     #e=m(e.view(1,1,-1).float()).squeeze().numpy()
     
     # Either add noise or just copy directly.
-    #glitchy=clean+np.random.normal(0,0.005, len(clean))
+    #glitchy=clean+np.random.normal(0,0.5, len(clean))
     glitchy=clean.copy()
          
     # Add glitches if desired
@@ -1090,8 +1167,8 @@ if __name__=="__main__":
     t0=time.time() # Optional to keep track of how long deglitching takes
     e_deglitched, deglitched_mu = Deglitcher.run_twostage(e,
                                             glitchy, 
-                                            crop_ind=crop_ind, 
-                                            sig_val=0.015, 
+                                            crop_ind, 
+                                            sig_val=0.0005, 
                                             visualize=True)
     t1=time.time()
 #==============================================================================    
