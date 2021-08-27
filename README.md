@@ -66,6 +66,8 @@ However, a glitch beginning with slow changes will not trigger the glitch detect
 
 - LSTMs have the capability to use future context to inform their predictions about a current point. This is the "bidirectional" feature. To me, this sounds incredibly promising as a way to make much better predictions. However, a necessary part of the deglitching algorithm is that it is known that all the data it uses to make a prediction is free of glitches. I think that there could be problems in the predictions if there are glitches in the future context it is trying to use. Perhaps the LSTM could be trained with glitches in the data to try to learn to ignore them, but I don't know how it could handle step glitches. If some clever algorithm could be found that uses future context without interference from glitches, then the prediction power of the LSTM could be very much increased with the bidirectional feature. In fact, the LSTM could possibly become unnecessary as a spline fit might work just as well. This could be the single biggest improvement to the algorithm; I just don't know if a solution exists.
 
+- It is possible that the technique of using Grubb's test to find outliers in the differences between predictions and their corresponding measurements is flawed. Much earlier in the development of the program, I tried simulating the effect of a "perfect" next point predictor, where I used points from the signal without added glitches or noise as the predictions. I found that with a perfect predictor, the deglitching algoroithm indeed worked flawlessly, indicating it to be an effective algorithm as is and suggesting there is merit in working to improve the accuracy of the predictions. However, this was earlier in the development when I was using simulated data and a deglitching algorithm with far fewer steps, so it would be worth trying the perfect predictor again to verify the use of improving predictions and identifying any possible failures in the rest of the algorithm.
+
 
 ### A discussion of other approaches
 
@@ -75,7 +77,7 @@ However, a glitch beginning with slow changes will not trigger the glitch detect
   +  Compared to other next point predictors, like a simple CNN, the LSTM learns how to store information about the long-term trends in the signal, which is very appropriate for the decaying oscillations in EXAFS data. 
   +  Mentioned in future work, the LSTM approach is not far from being able to make much better predictions or from deglitching as the data come in.
 
-- I found that the purely statistical method described in the paper "An algorithm for the automatic deglitching of x-ray absorption spectroscopy data" by S. M. Wallace *et al.* works decently, but I found it gave a fair number of false positives and false negatives. It also only works on point glitches.
+- I found that the purely statistical method described in the paper ["An algorithm for the automatic deglitching of x-ray absorption spectroscopy data"](https://doi.org/10.1107/S1600577521003611) by S. M. Wallace *et al.* works decently, but I found it gave a fair number of false positives and false negatives. It also only works on point glitches.
 
 - With so much hard-coding surrounding the machine learning model, I've wondered if decent results could come from simply fitting a spline to the chunks of data and extrapolating for the next prediction. Or using the chunk to estimate the first and possibly second or third derivative to use a Taylor series approximation for the prediction. I think it could be worth checking, and could avoid some issues with the transformation of the signal and the changes in sampling rates.
 
@@ -84,9 +86,17 @@ However, a glitch beginning with slow changes will not trigger the glitch detect
 - The uneven sampling problem
   + The model works almost perfectly on data that is evenly sampled and has similar characteristics in shape to the data on which it was trained. In these circumstances the potential of this LSTM model to be a powerful tool is clear. The largest hinderance (I think) is the extreme variation in sampling rate in the data. The sampling rate problem noticeably affected the performance of the rolling CNN as well, and is apparently a well known problem in the field of machine learning in general. A model that interprets the data the way we do--as a curve instead of a list of values--could be immune to changes in sampling rates and therefore much more effective in its predictions. 
   + I tried a few ideas, such as getting the model to guess the slope between points, feeding it the derivatives, and feeding it the energy values with the mu values (and a couple different combinations of the three) and none worked better than just having the model guess the next point given all the previous points.
-  + The paper "A review of irregular time series data handling with gated recurrent neural networks" by P. B. Weerakody *et al.* discusses some approaches to the irregularly spread data problem. I like the idea of using the LSTM to form the data into an ODE problem (quoted from the paper):
+  + The paper ["A review of irregular time series data handling with gated recurrent neural networks"](https://doi.org/10.1016/j.neucom.2021.02.046) by P. B. Weerakody *et al.* discusses some approaches to the irregularly spread data problem. I like the idea of using the LSTM to form the data into an ODE problem (quoted from the paper):
 >Neural ODEs [83] are a family of continuous-time models which parameterize the derivative of the hidden state using deep neural networks. In these models, the hidden state is defined as the solution to an ODE initial-value problem, where the hidden state can be calculated at any time (t) using a numerical ODE solver. Unlike traditional RNN based models, these models develop a continuous-time function and are not bound to discrete-time sequences. RNN with ODEs uses the update function of a gated RNN model and ODE differential equation solver to produce RNN models as a function of continuous-time. The resulting RNN models are capable of learning the dynamics between observations and therefore, naturally handle arbitrary time gaps prevalent in irregular and sparse data.
   + The ODE approach, and others described in this paper, is where I would first look for more ideas about how to better address the uneven sampling problem. 
+
+### Concluding thoughts
+
+The problem of detecting glitches in EXAFS data is well suited as an application for machine learning. It is a relatively simple task that benefits from being informed by an understanding of normal behaviour. EXAFS data especially is very similar in character between measurements, and each scan itself contains predictable long term behaviours, such as oscillations slow decay. A machine that knows these behaviours well should be able to easily identify anomolour points.
+
+The idea of glitch detection with machine learning is that the machine can use other reference scans and the context of the scan in question to determine what is an expected value of any given point. Glitches will then reveal themselves as deviants from the expected values. Alternatively, a machine can be taught how a glitch looks compared to normal data and then used to find them in the scan.   
+
+After much trial, error, and contemplation, I believe that the LSTM approach is the most promising. My current implementation of it is finicky, but perhaps effective enough to be useful. The biggest advantage of the LSTM approach is that it can be trained on normal data and requires no prior knowledge of what glitches look like. The biggest problem facing the LSTM is the changes in sampling rates in the incoming data. The biggest possible improvements to the model are a robust implementation of the bidirectional feature of LSTMs and a method to seamlessly account for the uneven sampling rates of the data.
 
 
 # 2. LSTM_on_mu.py
@@ -102,18 +112,14 @@ These files function identically to deglitch_mu.py, LSTM_on_mu.py, and lstm_mu.p
 
 deglitch_mu_w_chi_transform.py has not been updated to include the algorithms that handle the change in sampling rates. If you would like to use chi as the transformation for predictions, the chi transformation class can be copied or imported into the deglitch_mu.py script and `self.transform` can be changed in the `Mu_deglitcher` class. I haven't tried it, but I can't think of a reason for it not to work with that simple substitution. There may be issues with the x-axis now being k instead of E. 
 
-# 4. deglitch_sigval_range.py
-
-A simple script that contains a function to deglitch a signal repeatedly with different values for `sig_val`. The idea is that prominent glitches--and only prominent glitches--should should be identified by the algorithm for a range of values for `sig_val` but that range is not known beforehand. The function in this script identifies the unique set of point and step glitches that was reported more times in a range of consecutive values of `sig_val` than any other unique reported set of point and step glitches. In other words: as the function tries deglitching with increasing values of `sig_val`, there will be unique sets of point and step glitches that are reported many times in a row. The unique set that is reported the most times in a row is determined to be the best guess for the locations of real glitches. The function may also return the "best" deglitched spectrum. 
-
-# 5. find_glitch_w_rolling_CNN.py, rolling_CNN_classifier.py, and rolling_glitch_classifier1.pth
+# 4. find_glitch_w_rolling_CNN.py, rolling_CNN_classifier.py, and rolling_glitch_classifier1.pth
 
 These files are for the training and use of a convolutional neural network that takes in chunks of the sequence and classifies them as having a step glitch, monochromator glitch, or none. With such a classifier, it can be used to scan signals for the presence of the glitches and determine the range of point in which they are present. These files are not as well documented as the others.
 
 A rolling CNN glitch classifier requires training on normal and labelled glitchy data, and I found it to be less reliable than the LSTM for finding glitches of different sizes and slightly different shapes. There is no easy way to tune the sensitivity of it, and it can be inconsistent about which point exactly it thinks is the glitchy one. However, a rolling CNN has the advantage that it *only* needs to look at the chunk of points, which means the shape of the signal as a whole does not really affect its ability to detect glitches. And as it scans the data, it has the opportunity to detect the same glitch multiple times as a way of double-checking itself. It may also be able to look for and identify glitches of different shapes, like monochromator glitches. For a completely different approach to the LSTM, this would be my second choice. 
 
 
-# 6. discriminate_pixels.py
+# 5. discriminate_pixels.py
 
 Defines functions that take a set of fluorescence scans from the independent detectors (pixels) and sort out the ones without useful signal. Running the script runs a random example on sets of real data.
 
